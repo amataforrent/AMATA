@@ -4,30 +4,3 @@ export default {
     autoprefixer: {},
   },
 }
-เลื่อนลงล่าง กดปุ่มเขียว "Commit changes" → Commit changes อีกครั้ง
-เพิ่มไฟล์ที่ 2 — tailwind.config.js
-กด "Add file" → "Create new file" อีกครั้ง
-ชื่อไฟล์: tailwind.config.js
-เนื้อหา:
-/** @type {import('tailwindcss').Config} */
-export default {
-  content: ['./index.html', './src/**/*.{js,jsx}'],
-  theme: {
-    extend: {
-      colors: {
-        brand: {
-          DEFAULT: '#1E40AF',
-          50: '#eff4ff',
-          100: '#dbe6fe',
-          600: '#1E40AF',
-          700: '#1c3aa0',
-          800: '#1a3490',
-        },
-      },
-      fontFamily: {
-        sans: ['Sarabun', 'system-ui', 'sans-serif'],
-      },
-    },
-  },
-  plugins: [],
-}
