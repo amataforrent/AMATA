@@ -20,3 +20,11 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     detectSessionInUrl: true,
   },
 })
+
+// client แยกสำหรับ "สร้างบัญชีพนักงาน" — ไม่แตะ session ของแอดมินที่ล็อกอินอยู่
+// (persistSession=false จึงไม่เขียนทับ token ของผู้ดูแลใน localStorage)
+export function makeSignupClient() {
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  })
+}
