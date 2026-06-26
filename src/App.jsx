@@ -320,7 +320,7 @@ const NAV = [
   { key: 'staff', label: 'จัดการพนักงาน', icon: Icon.staff, roles: ['admin'] },
 ]
 
-function Shell({ session, profile, branches }) {
+function Shell({ session, profile, branches, refreshBranches }) {
   const [page, setPage] = useState('dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const toast = useToast()
@@ -411,7 +411,7 @@ function Shell({ session, profile, branches }) {
             ? <AdminDashboard profile={profile} branches={branches} onNavigate={go} />
             : <Dashboard profile={profile} branches={branches} />)}
           {page === 'report' && <Reports profile={profile} branches={branches} toast={toast} />}
-          {page === 'branches' && role === 'admin' && <Branches toast={toast} />}
+          {page === 'branches' && role === 'admin' && <Branches toast={toast} refreshBranches={refreshBranches} />}
           {page === 'rooms' && <Rooms profile={profile} branches={branches} toast={toast} />}
           {page === 'tenants' && <Tenants profile={profile} branches={branches} toast={toast} />}
           {page === 'meter' && <WaterMeter profile={profile} branches={branches} toast={toast} />}
@@ -499,7 +499,7 @@ function Dashboard({ profile, branches }) {
 /* ============================================================
    BRANCHES (admin) — สาขา + ประเภทห้อง
    ============================================================ */
-function Branches({ toast }) {
+function Branches({ toast, refreshBranches }) {
   const [loading, setLoading] = useState(true)
   const [branches, setBranches] = useState([])
   const [editing, setEditing] = useState(null) // branch obj or {} (new) or null
@@ -535,6 +535,7 @@ function Branches({ toast }) {
     toast(editing.id ? 'แก้ไขสาขาเรียบร้อย' : 'เพิ่มสาขาเรียบร้อย')
     setEditing(null)
     load()
+    refreshBranches?.()
   }
 
   const remove = async (b) => {
@@ -543,6 +544,7 @@ function Branches({ toast }) {
     if (error) return toast('ลบไม่สำเร็จ: ' + error.message, 'error')
     toast('ลบสาขาเรียบร้อย')
     load()
+    refreshBranches?.()
   }
 
   if (loading) return <FullLoader />
@@ -1568,19 +1570,20 @@ function WaterMeter({ profile, branches, toast }) {
           .filter((l) => key(l.year, l.month) < selKey)
           .sort((a, b) => key(b.year, b.month) - key(a.year, a.month))[0]
         const prev = existing ? existing.previous_unit : prevLog ? prevLog.current_unit : 0
-        return { room: r, prev: Number(prev), current: existing ? String(existing.current_unit) : '', existingId: existing?.id }
+        return { room: r, prev: String(prev), current: existing ? String(existing.current_unit) : '', existingId: existing?.id }
       })
     setRows(list)
     setLoading(false)
   }, [branchId, month, year])
   useEffect(() => { load() }, [load])
 
-  const setCurrent = (roomId, val) => setRows((rs) => rs.map((x) => (x.room.id === roomId ? { ...x, current: val } : x)))
+  const setField = (roomId, key, val) => setRows((rs) => rs.map((x) => (x.room.id === roomId ? { ...x, [key]: val } : x)))
 
   const calc = (r) => {
     const cur = r.current === '' ? null : Number(r.current)
     if (cur === null) return null
-    const used = Math.max(0, cur - r.prev)
+    const prev = r.prev === '' ? 0 : Number(r.prev)
+    const used = Math.max(0, cur - prev)
     const cost = used * Number(setting.price_per_unit) + Number(setting.meter_maintenance_fee)
     return { used, cost }
   }
@@ -1594,7 +1597,7 @@ function WaterMeter({ profile, branches, toast }) {
       branch_id: branchId,
       recorded_by: profile.id,
       month, year,
-      previous_unit: r.prev,
+      previous_unit: r.prev === '' ? 0 : Number(r.prev),
       current_unit: Number(r.current),
       price_per_unit: Number(setting.price_per_unit),
       meter_maintenance_fee: Number(setting.meter_maintenance_fee),
@@ -1628,12 +1631,17 @@ function WaterMeter({ profile, branches, toast }) {
               return (
                 <div key={r.room.id} className="bg-white rounded-2xl border border-slate-100 p-4">
                   <div className="flex items-center justify-between gap-3">
+                    <p className="font-bold text-slate-800">ห้อง {r.room.room_number}</p>
+                    {r.existingId && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">บันทึกแล้ว</span>}
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 mt-2">
                     <div>
-                      <p className="font-bold text-slate-800">ห้อง {r.room.room_number}</p>
-                      <p className="text-xs text-slate-400">เลขก่อนหน้า: {r.prev}{r.existingId ? ' · บันทึกแล้ว' : ''}</p>
+                      <p className="text-xs text-slate-500 mb-1">เลขมิเตอร์ก่อนหน้า</p>
+                      <Input type="number" inputMode="numeric" value={r.prev} onChange={(e) => setField(r.room.id, 'prev', e.target.value)} placeholder="เลขเก่า" />
                     </div>
-                    <div className="w-32">
-                      <Input type="number" inputMode="numeric" value={r.current} onChange={(e) => setCurrent(r.room.id, e.target.value)} placeholder="เลขล่าสุด" />
+                    <div>
+                      <p className="text-xs text-slate-500 mb-1">เลขมิเตอร์ปัจจุบัน</p>
+                      <Input type="number" inputMode="numeric" value={r.current} onChange={(e) => setField(r.room.id, 'current', e.target.value)} placeholder="เลขล่าสุด" />
                     </div>
                   </div>
                   {c && (
@@ -3129,6 +3137,11 @@ function Root() {
     return () => sub.subscription.unsubscribe()
   }, [])
 
+  const refreshBranches = useCallback(async () => {
+    const { data: b } = await supabase.from('branches').select('id, name').order('name')
+    setBranches(b || [])
+  }, [])
+
   useEffect(() => {
     if (!session) {
       setProfile(null)
@@ -3165,7 +3178,7 @@ function Root() {
     )
   }
 
-  return <Shell session={session} profile={profile} branches={branches} />
+  return <Shell session={session} profile={profile} branches={branches} refreshBranches={refreshBranches} />
 }
 
 function InstallButton() {
