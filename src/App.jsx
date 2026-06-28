@@ -1439,8 +1439,8 @@ const STATUS_INV = {
 /* ---- ตั้งค่าบิล/PromptPay เก็บใน localStorage ---- */
 const BILL_CFG_KEY = 'dorm_bill_cfg'
 const loadBillCfg = () => {
-  try { return { business_name: '', address: '', promptpay_id: '', due_day: 5, ...(JSON.parse(localStorage.getItem(BILL_CFG_KEY)) || {}) } }
-  catch { return { business_name: '', address: '', promptpay_id: '', due_day: 5 } }
+  try { return { business_name: '', address: '', promptpay_id: '', due_day: 5, bank_name: '', bank_account: '', bank_account_name: '', ...(JSON.parse(localStorage.getItem(BILL_CFG_KEY)) || {}) } }
+  catch { return { business_name: '', address: '', promptpay_id: '', due_day: 5, bank_name: '', bank_account: '', bank_account_name: '' } }
 }
 const saveBillCfg = (c) => localStorage.setItem(BILL_CFG_KEY, JSON.stringify(c))
 
@@ -1527,10 +1527,16 @@ function WaterPrice({ profile, branches, toast }) {
       <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 space-y-4">
         <p className="font-bold text-slate-800">ข้อมูลหัวบิล / PromptPay (ใช้ทุกสาขา)</p>
         <div className="grid sm:grid-cols-2 gap-3">
-          <Field label="ชื่อกิจการ"><Input value={cfg.business_name} onChange={(e) => setCfg({ ...cfg, business_name: e.target.value })} placeholder="เช่น หอพักสุขใจ" /></Field>
-          <Field label="เบอร์/เลขบัตร PromptPay"><Input value={cfg.promptpay_id} onChange={(e) => setCfg({ ...cfg, promptpay_id: e.target.value })} placeholder="0812345678" /></Field>
-          <Field label="ที่อยู่กิจการ"><Input value={cfg.address} onChange={(e) => setCfg({ ...cfg, address: e.target.value })} /></Field>
+          <Field label="ชื่อกิจการ"><Input value={cfg.business_name} onChange={(e) => setCfg({ ...cfg, business_name: e.target.value })} placeholder="เช่น หอพักอมตะ" /></Field>
+          <Field label="ที่อยู่กิจการ"><Input value={cfg.address} onChange={(e) => setCfg({ ...cfg, address: e.target.value })} placeholder="เลขที่ ถนน อำเภอ จังหวัด" /></Field>
           <Field label="ครบกำหนดชำระ (วันที่ของเดือน)"><Input type="number" min="1" max="28" value={cfg.due_day} onChange={(e) => setCfg({ ...cfg, due_day: Number(e.target.value) })} /></Field>
+          <Field label="เบอร์/เลขบัตร PromptPay (สำหรับ QR)"><Input value={cfg.promptpay_id} onChange={(e) => setCfg({ ...cfg, promptpay_id: e.target.value })} placeholder="0812345678 หรือเลขบัตรประชาชน" /></Field>
+        </div>
+        <p className="text-sm font-semibold text-slate-700 mt-1">บัญชีธนาคารสำหรับโอนเงิน</p>
+        <div className="grid sm:grid-cols-3 gap-3">
+          <Field label="ธนาคาร"><Input value={cfg.bank_name} onChange={(e) => setCfg({ ...cfg, bank_name: e.target.value })} placeholder="เช่น กสิกรไทย, ไทยพาณิชย์" /></Field>
+          <Field label="เลขบัญชี"><Input value={cfg.bank_account} onChange={(e) => setCfg({ ...cfg, bank_account: e.target.value })} placeholder="xxx-x-xxxxx-x" /></Field>
+          <Field label="ชื่อบัญชี"><Input value={cfg.bank_account_name} onChange={(e) => setCfg({ ...cfg, bank_account_name: e.target.value })} placeholder="ชื่อ-นามสกุล" /></Field>
         </div>
         <div className="flex justify-end"><Button variant="outline" onClick={saveCfg}>บันทึกข้อมูลบิล</Button></div>
       </div>
@@ -1946,8 +1952,16 @@ function InvoiceDocViewer() {
           </div>
           {inv.due_date && !isReceipt && <p style={{ ...muted, marginTop: 8 }}>ครบกำหนดชำระ {inv.due_date}</p>}
           {isReceipt && <p style={{ ...muted, marginTop: 8 }}>ชำระแล้ว · {ctx.paidMethod || ''} {ctx.paidAt || ''}</p>}
+          {(cfg.bank_name || cfg.bank_account) && !isReceipt && (
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #f1f5f9' }}>
+              <p style={{ ...muted, marginBottom: 4 }}>ชำระผ่านการโอนเงิน:</p>
+              {cfg.bank_name && <p style={{ margin: '2px 0', fontSize: 14 }}>ธนาคาร: <b>{cfg.bank_name}</b></p>}
+              {cfg.bank_account && <p style={{ margin: '2px 0', fontSize: 14 }}>เลขบัญชี: <b>{cfg.bank_account}</b></p>}
+              {cfg.bank_account_name && <p style={{ margin: '2px 0', fontSize: 14 }}>ชื่อบัญชี: <b>{cfg.bank_account_name}</b></p>}
+            </div>
+          )}
           {qr && !isReceipt && (
-            <div style={{ textAlign: 'center', marginTop: 18, paddingTop: 16, borderTop: '1px dashed #cbd5e1' }}>
+            <div style={{ textAlign: 'center', marginTop: 14, paddingTop: 14, borderTop: '1px dashed #cbd5e1' }}>
               <p style={muted}>สแกนเพื่อชำระผ่าน PromptPay</p>
               <img src={qr} alt="PromptPay QR" crossOrigin="anonymous" style={{ width: 180, height: 180 }} />
               <p style={muted}>{cfg.promptpay_id}</p>
