@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, createContext, useContext } from 'react'
-import { supabase } from './supabaseClient'
+import { supabase, makeSignupClient } from './supabaseClient'
 import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -237,6 +237,11 @@ const Icon = {
       <path d="M12 3v18M8 7h6a2.5 2.5 0 010 5H8m0 0h7a2.5 2.5 0 010 5H8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  wrench: (p) => (
+    <svg viewBox="0 0 24 24" fill="none" width="20" height="20" {...p}>
+      <path d="M14.5 5.5a3.5 3.5 0 01-4.7 4.2L5 14.5a2 2 0 102.8 2.8l4.8-4.8a3.5 3.5 0 004.2-4.7l-2 2-2-2 2-2z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+    </svg>
+  ),
 }
 
 /* ============================================================
@@ -310,6 +315,7 @@ const NAV = [
   { key: 'rooms', label: 'จัดการห้องเช่า', icon: Icon.room, roles: ['admin', 'collector', 'water_staff'] },
   { key: 'tenants', label: 'จัดการผู้เช่า', icon: Icon.tenant, roles: ['admin', 'collector', 'water_staff'] },
   { key: 'meter', label: 'จดมิเตอร์น้ำ', icon: Icon.meter, roles: ['admin', 'water_staff'] },
+  { key: 'maintenance', label: 'แจ้งซ่อม', icon: Icon.wrench, roles: ['admin', 'collector', 'water_staff'] },
   { key: 'issue', label: 'ออกบิล', icon: Icon.invoice, roles: ['admin', 'collector'] },
   { key: 'receive', label: 'รับชำระเงิน', icon: Icon.pay, roles: ['admin', 'collector'] },
   { key: 'tracking', label: 'ติดตามบิล', icon: Icon.list, roles: ['admin', 'collector', 'water_staff'] },
@@ -415,6 +421,7 @@ function Shell({ session, profile, branches, refreshBranches }) {
           {page === 'rooms' && <Rooms profile={profile} branches={branches} toast={toast} />}
           {page === 'tenants' && <Tenants profile={profile} branches={branches} toast={toast} />}
           {page === 'meter' && <WaterMeter profile={profile} branches={branches} toast={toast} />}
+          {page === 'maintenance' && <Maintenance profile={profile} branches={branches} toast={toast} />}
           {page === 'issue' && (profile.role === 'admin' || profile.role === 'collector') && <IssueInvoices profile={profile} branches={branches} toast={toast} />}
           {page === 'receive' && (profile.role === 'admin' || profile.role === 'collector') && <ReceivePayment profile={profile} branches={branches} toast={toast} />}
           {page === 'tracking' && <InvoiceTracking profile={profile} branches={branches} toast={toast} />}
@@ -1334,19 +1341,37 @@ function CreateStaffModal({ branches, onClose, onDone, toast }) {
     if (!form.email.trim() || form.password.length < 6) return toast('กรอกอีเมล และรหัสผ่านอย่างน้อย 6 ตัว', 'error')
     setSaving(true)
     try {
-      const { data: { session } } = await supabase.auth.getSession()
-      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/create-staff`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token}` },
-        body: JSON.stringify(form),
+      // 1) สร้างบัญชีผ่าน client แยก (ไม่แตะ session แอดมิน)
+      const signup = makeSignupClient()
+      const { data, error } = await signup.auth.signUp({
+        email: form.email.trim(),
+        password: form.password,
+        options: { data: { full_name: form.full_name, phone: form.phone, role: form.role } },
       })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json.error || 'สร้างพนักงานไม่สำเร็จ')
+      if (error) throw new Error(error.message)
+      const newId = data.user?.id
+      if (!newId) throw new Error('สร้างบัญชีไม่สำเร็จ')
+
+      // 2) แอดมินตั้ง role/ข้อมูล/สาขา (ใช้สิทธิ์แอดมินผ่าน client หลัก)
+      await supabase.from('profiles').upsert({
+        id: newId,
+        email: form.email.trim(),
+        full_name: form.full_name || '',
+        phone: form.phone || null,
+        role: form.role,
+        is_active: true,
+      })
+      if (form.role !== 'admin' && form.branchIds.length) {
+        await supabase.from('user_branches').insert(
+          form.branchIds.map((bid) => ({ user_id: newId, branch_id: bid, role: form.role })),
+        )
+      }
       toast('สร้างพนักงานเรียบร้อย')
       onClose()
       onDone()
     } catch (err) {
-      toast(err.message, 'error')
+      const msg = /already registered|already been registered/i.test(err.message) ? 'อีเมลนี้ถูกใช้แล้ว' : err.message
+      toast(msg, 'error')
     } finally {
       setSaving(false)
     }
@@ -1392,7 +1417,7 @@ function CreateStaffModal({ branches, onClose, onDone, toast }) {
           </Field>
         )}
         <p className="text-xs text-slate-400">
-          * การสร้างบัญชีใช้ Supabase Edge Function “create-staff” (ดูวิธีติดตั้งใน README)
+          * สร้างบัญชีให้ทันที พนักงานล็อกอินได้เลย (ต้องปิด “Confirm email” ใน Supabase → Authentication → Sign In/Providers → Email)
         </p>
       </form>
     </Modal>
@@ -1812,72 +1837,140 @@ function promptpayImg(id, amount) {
   return `https://promptpay.io/${clean}/${Number(amount || 0).toFixed(2)}.png`
 }
 
-function buildInvoiceHtml(inv, ctx, isReceipt) {
+function InvoiceDocViewer() {
+  const [doc, setDoc] = useState(null) // { inv, ctx, isReceipt }
+  const [busy, setBusy] = useState('')
+  const nodeRef = React.useRef(null)
+  const toast = useToast()
+
+  useEffect(() => {
+    const h = (e) => setDoc(e.detail)
+    window.addEventListener('show-invoice-doc', h)
+    return () => window.removeEventListener('show-invoice-doc', h)
+  }, [])
+
+  if (!doc) return null
+  const { inv, ctx, isReceipt } = doc
   const cfg = loadBillCfg()
   const qr = promptpayImg(cfg.promptpay_id, inv.total_amount)
+  const units = ctx.units != null ? ctx.units : null
   const rows = [
     ['ค่าเช่าห้อง', inv.rent_amount],
-    [`ค่าน้ำ${ctx.units != null ? ` (${ctx.units} หน่วย)` : ''}`, inv.water_cost],
+    [`ค่าน้ำ${units != null ? ` (${units} หน่วย)` : ''}`, inv.water_cost],
   ]
   if (Number(inv.other_fees) > 0) rows.push([inv.other_fees_note || 'ค่าใช้จ่ายอื่น ๆ', inv.other_fees])
-  const itemRows = rows
-    .map((r) => `<tr><td>${r[0]}</td><td style="text-align:right">${fmtBaht(r[1])}</td></tr>`)
-    .join('')
-  return `<!doctype html><html lang="th"><head><meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
-  <title>${inv.invoice_number}</title>
-  <style>
-    *{box-sizing:border-box;font-family:'Sarabun',sans-serif}
-    body{margin:0;background:#f1f5f9;color:#0f172a}
-    .doc{max-width:420px;margin:0 auto;background:#fff;padding:28px 24px}
-    h1{font-size:20px;margin:0;color:#1E40AF}
-    .muted{color:#64748b;font-size:13px}
-    .badge{display:inline-block;background:${isReceipt ? '#dcfce7;color:#15803d' : '#fef9c3;color:#a16207'};padding:3px 10px;border-radius:99px;font-size:12px;font-weight:600}
-    table{width:100%;border-collapse:collapse;margin:14px 0;font-size:15px}
-    td{padding:8px 0;border-bottom:1px solid #f1f5f9}
-    .total{display:flex;justify-content:space-between;font-size:18px;font-weight:700;margin-top:6px}
-    .total .amt{color:#1E40AF}
-    .qr{text-align:center;margin-top:18px;padding-top:16px;border-top:1px dashed #cbd5e1}
-    .qr img{width:180px;height:180px}
-    .btns{max-width:420px;margin:14px auto;display:flex;gap:8px;padding:0 24px}
-    .btns button{flex:1;padding:12px;border:0;border-radius:12px;font-family:inherit;font-size:15px;font-weight:600;cursor:pointer}
-    .print{background:#1E40AF;color:#fff}.share{background:#e2e8f0;color:#334155}
-    @media print{body{background:#fff}.btns{display:none}.doc{max-width:100%}}
-  </style></head><body>
-  <div class="doc">
-    <div style="display:flex;justify-content:space-between;align-items:flex-start">
-      <div>
-        <h1>${cfg.business_name || 'ระบบจัดการหอพัก'}</h1>
-        <p class="muted">${ctx.branchName || ''}${cfg.address ? '<br>' + cfg.address : ''}</p>
+
+  const fileName = `${isReceipt ? 'ใบเสร็จ' : 'บิล'}-${inv.invoice_number}`
+
+  const makePng = async () => {
+    if (!window.htmlToImage) throw new Error('ไลบรารีรูปภาพยังโหลดไม่เสร็จ ลองใหม่อีกครั้ง')
+    return await window.htmlToImage.toPng(nodeRef.current, { pixelRatio: 2, backgroundColor: '#ffffff', cacheBust: true })
+  }
+
+  const downloadPng = async () => {
+    setBusy('png')
+    try {
+      const url = await makePng()
+      const a = document.createElement('a')
+      a.href = url; a.download = fileName + '.png'; a.click()
+      toast('บันทึกรูป PNG แล้ว')
+    } catch (e) { toast('บันทึก PNG ไม่สำเร็จ: ' + e.message, 'error') }
+    setBusy('')
+  }
+
+  const downloadPdf = async () => {
+    setBusy('pdf')
+    try {
+      const url = await makePng()
+      const iframe = document.createElement('iframe')
+      iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0'
+      document.body.appendChild(iframe)
+      const idoc = iframe.contentWindow.document
+      idoc.open()
+      idoc.write(`<!doctype html><html><head><meta charset="utf-8"><title>${fileName}</title>
+        <style>@page{margin:12mm}html,body{margin:0;padding:0}img{width:100%;display:block}</style>
+        </head><body><img src="${url}"></body></html>`)
+      idoc.close()
+      const img = idoc.querySelector('img')
+      const go = () => { iframe.contentWindow.focus(); iframe.contentWindow.print(); setTimeout(() => iframe.remove(), 1500) }
+      if (img.complete) setTimeout(go, 250); else img.onload = () => setTimeout(go, 250)
+      toast('เปิดหน้าต่างพิมพ์ / บันทึก PDF')
+    } catch (e) { toast('สร้าง PDF ไม่สำเร็จ: ' + e.message, 'error') }
+    setBusy('')
+  }
+
+  const share = async () => {
+    setBusy('share')
+    try {
+      const url = await makePng()
+      const blob = await (await fetch(url)).blob()
+      const file = new File([blob], fileName + '.png', { type: 'image/png' })
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: inv.invoice_number, text: `${isReceipt ? 'ใบเสร็จ' : 'ใบแจ้งหนี้'} ${ctx.tenantName || ''} ยอด ${fmtBaht(inv.total_amount)}` })
+      } else if (navigator.share) {
+        await navigator.share({ title: inv.invoice_number, text: `${isReceipt ? 'ใบเสร็จ' : 'ใบแจ้งหนี้'} ${ctx.tenantName || ''} ยอด ${fmtBaht(inv.total_amount)}` })
+      } else {
+        toast('อุปกรณ์นี้ไม่รองรับการแชร์ ใช้ดาวน์โหลด PNG แทน', 'error')
+      }
+    } catch (e) { if (e.name !== 'AbortError') toast('แชร์ไม่สำเร็จ: ' + e.message, 'error') }
+    setBusy('')
+  }
+
+  const muted = { color: '#64748b', fontSize: 13, margin: 0 }
+  return (
+    <div onClick={() => setDoc(null)} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'rgba(15,23,42,.55)', display: 'flex', flexDirection: 'column', alignItems: 'center', overflowY: 'auto', padding: '16px 12px 24px' }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 420 }}>
+        {/* invoice card */}
+        <div ref={nodeRef} style={{ background: '#fff', padding: '28px 24px', borderRadius: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+            <div>
+              <h1 style={{ fontSize: 20, margin: 0, color: '#1E40AF' }}>{cfg.business_name || 'ระบบจัดการหอพัก'}</h1>
+              <p style={muted}>{ctx.branchName || ''}{cfg.address ? <><br />{cfg.address}</> : ''}</p>
+            </div>
+            <span style={{ display: 'inline-block', padding: '3px 10px', borderRadius: 99, fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', background: isReceipt ? '#dcfce7' : '#fef9c3', color: isReceipt ? '#15803d' : '#a16207' }}>{isReceipt ? 'ใบเสร็จรับเงิน' : 'ใบแจ้งหนี้'}</span>
+          </div>
+          <p style={{ ...muted, marginTop: 14 }}>เลขที่ {inv.invoice_number} · รอบ {monthLabel(inv.month)} {inv.year + 543}</p>
+          <p style={{ margin: '4px 0' }}><b>{ctx.tenantName || '-'}</b> · ห้อง {ctx.roomNumber || '-'}</p>
+          <table style={{ width: '100%', borderCollapse: 'collapse', margin: '14px 0', fontSize: 15 }}>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i}>
+                  <td style={{ padding: '8px 0', borderBottom: '1px solid #f1f5f9' }}>{r[0]}</td>
+                  <td style={{ padding: '8px 0', borderBottom: '1px solid #f1f5f9', textAlign: 'right' }}>{fmtBaht(r[1])}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 18, fontWeight: 700, marginTop: 6 }}>
+            <span>ยอดรวมทั้งสิ้น</span><span style={{ color: '#1E40AF' }}>{fmtBaht(inv.total_amount)}</span>
+          </div>
+          {inv.due_date && !isReceipt && <p style={{ ...muted, marginTop: 8 }}>ครบกำหนดชำระ {inv.due_date}</p>}
+          {isReceipt && <p style={{ ...muted, marginTop: 8 }}>ชำระแล้ว · {ctx.paidMethod || ''} {ctx.paidAt || ''}</p>}
+          {qr && !isReceipt && (
+            <div style={{ textAlign: 'center', marginTop: 18, paddingTop: 16, borderTop: '1px dashed #cbd5e1' }}>
+              <p style={muted}>สแกนเพื่อชำระผ่าน PromptPay</p>
+              <img src={qr} alt="PromptPay QR" crossOrigin="anonymous" style={{ width: 180, height: 180 }} />
+              <p style={muted}>{cfg.promptpay_id}</p>
+            </div>
+          )}
+        </div>
+        {/* actions */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
+          <button onClick={downloadPng} disabled={!!busy} style={btnStyle('#0f766e')}>{busy === 'png' ? 'กำลังสร้าง…' : '⬇ บันทึก PNG'}</button>
+          <button onClick={downloadPdf} disabled={!!busy} style={btnStyle('#1E40AF')}>{busy === 'pdf' ? 'กำลังสร้าง…' : '🖨 พิมพ์ / PDF'}</button>
+          <button onClick={share} disabled={!!busy} style={btnStyle('#475569')}>{busy === 'share' ? 'กำลังสร้าง…' : '↗ แชร์'}</button>
+          <button onClick={() => setDoc(null)} disabled={!!busy} style={btnStyle('#e2e8f0', '#334155')}>ปิด</button>
+        </div>
       </div>
-      <span class="badge">${isReceipt ? 'ใบเสร็จรับเงิน' : 'ใบแจ้งหนี้'}</span>
     </div>
-    <p class="muted" style="margin-top:14px">เลขที่ ${inv.invoice_number} · รอบ ${monthLabel(inv.month)} ${inv.year + 543}</p>
-    <p style="margin:4px 0"><b>${ctx.tenantName || '-'}</b> · ห้อง ${ctx.roomNumber || '-'}</p>
-    <table><tbody>${itemRows}</tbody></table>
-    <div class="total"><span>ยอดรวมทั้งสิ้น</span><span class="amt">${fmtBaht(inv.total_amount)}</span></div>
-    ${inv.due_date && !isReceipt ? `<p class="muted" style="margin-top:8px">ครบกำหนดชำระ ${inv.due_date}</p>` : ''}
-    ${isReceipt ? `<p class="muted" style="margin-top:8px">ชำระแล้ว · ${ctx.paidMethod || ''} ${ctx.paidAt || ''}</p>` : ''}
-    ${qr && !isReceipt ? `<div class="qr"><p class="muted">สแกนเพื่อชำระผ่าน PromptPay</p><img src="${qr}" alt="PromptPay QR"><p class="muted">${cfg.promptpay_id}</p></div>` : ''}
-  </div>
-  <div class="btns">
-    <button class="print" onclick="window.print()">พิมพ์ / บันทึก PDF</button>
-    <button class="share" onclick="doShare()">แชร์</button>
-  </div>
-  <script>
-    function doShare(){
-      if(navigator.share){navigator.share({title:'${inv.invoice_number}',text:'${(isReceipt?'ใบเสร็จ':'ใบแจ้งหนี้')} ${ctx.tenantName||''} ยอด ${fmtBaht(inv.total_amount)}'}).catch(function(){})}
-      else{alert('อุปกรณ์นี้ไม่รองรับการแชร์ ใช้ปุ่มพิมพ์/บันทึก PDF แทน')}
-    }
-  </script></body></html>`
+  )
+}
+function btnStyle(bg, color = '#fff') {
+  return { padding: '12px', border: 0, borderRadius: 12, fontFamily: 'inherit', fontSize: 15, fontWeight: 600, cursor: 'pointer', background: bg, color, opacity: 1 }
 }
 
 function openInvoiceDoc(inv, ctx, isReceipt) {
-  const w = window.open('', '_blank')
-  if (!w) { alert('กรุณาอนุญาต popup เพื่อเปิดเอกสาร'); return }
-  w.document.write(buildInvoiceHtml(inv, ctx, isReceipt))
-  w.document.close()
+  window.dispatchEvent(new CustomEvent('show-invoice-doc', { detail: { inv, ctx, isReceipt } }))
 }
 
 /* ============================================================
@@ -3123,6 +3216,216 @@ function downloadCsv(filename, matrix) {
 }
 
 /* ============================================================
+   PHASE 5 — แจ้งซ่อม / แจ้งปัญหา (ทุกตำแหน่ง)
+   ============================================================ */
+const MR_STATUS = {
+  open: { label: 'รอดำเนินการ', cls: 'bg-amber-100 text-amber-700' },
+  in_progress: { label: 'กำลังซ่อม', cls: 'bg-blue-100 text-blue-700' },
+  done: { label: 'เสร็จแล้ว', cls: 'bg-emerald-100 text-emerald-700' },
+  cancelled: { label: 'ยกเลิก', cls: 'bg-slate-200 text-slate-500' },
+}
+const MR_CATS = ['น้ำ', 'ไฟ', 'แอร์', 'โครงสร้าง/ห้อง', 'อื่น ๆ']
+const MR_PRIORITY = { low: 'ไม่เร่งด่วน', normal: 'ปกติ', high: 'เร่งด่วน' }
+
+function Maintenance({ profile, branches, toast }) {
+  const isAdmin = profile.role === 'admin'
+  const [loading, setLoading] = useState(true)
+  const [items, setItems] = useState([])
+  const [rooms, setRooms] = useState([])
+  const [fBranch, setFBranch] = useState('')
+  const [fStatus, setFStatus] = useState('')
+  const [adding, setAdding] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    let q = supabase.from('maintenance_requests').select('*').order('created_at', { ascending: false })
+    if (fBranch) q = q.eq('branch_id', fBranch)
+    if (fStatus) q = q.eq('status', fStatus)
+    const [{ data: m }, { data: r }] = await Promise.all([
+      q,
+      supabase.from('rooms').select('id, room_number'),
+    ])
+    setItems(m || [])
+    setRooms(r || [])
+    setLoading(false)
+  }, [fBranch, fStatus])
+  useEffect(() => { load() }, [load])
+
+  const roomNo = (id) => rooms.find((x) => x.id === id)?.room_number
+  const branchName = (id) => branches.find((b) => b.id === id)?.name || ''
+
+  const setStatus = async (item, status) => {
+    const patch = { status, resolved_at: status === 'done' ? new Date().toISOString() : null }
+    const { error } = await supabase.from('maintenance_requests').update(patch).eq('id', item.id)
+    if (error) return toast('อัปเดตไม่สำเร็จ: ' + error.message, 'error')
+    toast('อัปเดตสถานะแล้ว')
+    load()
+  }
+  const remove = async (item) => {
+    if (!confirm('ลบรายการแจ้งซ่อมนี้?')) return
+    const { error } = await supabase.from('maintenance_requests').delete().eq('id', item.id)
+    if (error) return toast('ลบไม่สำเร็จ: ' + error.message, 'error')
+    toast('ลบแล้ว')
+    load()
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2 items-center">
+        <Select value={fBranch} onChange={(e) => setFBranch(e.target.value)} className="!w-auto flex-1 min-w-[150px]">
+          <option value="">ทุกสาขา</option>
+          {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </Select>
+        <Select value={fStatus} onChange={(e) => setFStatus(e.target.value)} className="!w-auto flex-1 min-w-[140px]">
+          <option value="">ทุกสถานะ</option>
+          <option value="open">รอดำเนินการ</option>
+          <option value="in_progress">กำลังซ่อม</option>
+          <option value="done">เสร็จแล้ว</option>
+          <option value="cancelled">ยกเลิก</option>
+        </Select>
+        <Button onClick={() => setAdding(true)}>+ แจ้งซ่อม</Button>
+      </div>
+
+      {loading ? <FullLoader /> : items.length === 0 ? (
+        <EmptyState icon="🔧" title="ยังไม่มีรายการแจ้งซ่อม" hint="กด + แจ้งซ่อม เพื่อแจ้งปัญหา" />
+      ) : (
+        <div className="space-y-2">
+          {items.map((it) => (
+            <div key={it.id} className="bg-white rounded-2xl border border-slate-100 p-4">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="font-bold text-slate-800">{it.title}</p>
+                    {it.priority === 'high' && <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-red-100 text-red-700">เร่งด่วน</span>}
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {branchName(it.branch_id)}{roomNo(it.room_id) ? ` · ห้อง ${roomNo(it.room_id)}` : ''}{it.category ? ` · ${it.category}` : ''} · {new Date(it.created_at).toLocaleDateString('th-TH')}
+                  </p>
+                </div>
+                <span className={'text-[11px] font-semibold px-2 py-1 rounded-full shrink-0 ' + MR_STATUS[it.status].cls}>{MR_STATUS[it.status].label}</span>
+              </div>
+              {it.description && <p className="text-sm text-slate-600 mt-2">{it.description}</p>}
+              {it.image_url && <MrImage path={it.image_url} />}
+              <div className="flex flex-wrap gap-1 mt-3 pt-3 border-t border-slate-100">
+                {it.status === 'open' && <button className="text-xs text-blue-600 px-2 py-1" onClick={() => setStatus(it, 'in_progress')}>เริ่มซ่อม</button>}
+                {it.status !== 'done' && it.status !== 'cancelled' && <button className="text-xs text-emerald-600 px-2 py-1" onClick={() => setStatus(it, 'done')}>เสร็จแล้ว</button>}
+                {it.status !== 'cancelled' && it.status !== 'done' && <button className="text-xs text-slate-500 px-2 py-1" onClick={() => setStatus(it, 'cancelled')}>ยกเลิก</button>}
+                {isAdmin && <button className="text-xs text-red-500 px-2 py-1 ml-auto" onClick={() => remove(it)}>ลบ</button>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {adding && <MaintenanceModal profile={profile} branches={branches} onClose={() => setAdding(false)} onDone={() => { setAdding(false); load() }} toast={toast} />}
+    </div>
+  )
+}
+
+function MrImage({ path }) {
+  const [url, setUrl] = useState(null)
+  useEffect(() => {
+    ;(async () => {
+      const { data } = await supabase.storage.from('receipts').createSignedUrl(path, 3600)
+      if (data?.signedUrl) setUrl(data.signedUrl)
+    })()
+  }, [path])
+  if (!url) return null
+  return <a href={url} target="_blank" rel="noreferrer"><img src={url} alt="รูปแจ้งซ่อม" className="mt-2 rounded-lg max-h-48 border border-slate-200" /></a>
+}
+
+function MaintenanceModal({ profile, branches, onClose, onDone, toast }) {
+  const [f, setF] = useState({
+    branch_id: branches[0]?.id || '', room_id: '', title: '', category: MR_CATS[0],
+    priority: 'normal', description: '',
+  })
+  const [rooms, setRooms] = useState([])
+  const [file, setFile] = useState(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (!f.branch_id) { setRooms([]); return }
+    supabase.from('rooms').select('id, room_number').eq('branch_id', f.branch_id).order('room_number')
+      .then(({ data }) => setRooms(data || []))
+  }, [f.branch_id])
+
+  const submit = async () => {
+    if (!f.branch_id) return toast('เลือกสาขา', 'error')
+    if (!f.title.trim()) return toast('กรอกหัวข้อปัญหา', 'error')
+    setSaving(true)
+    let imagePath = null
+    if (file) {
+      const ext = file.name.split('.').pop()
+      const path = `${f.branch_id}/mr-${Date.now()}.${ext}`
+      const { error: upErr } = await supabase.storage.from('receipts').upload(path, file, { upsert: true })
+      if (upErr) { setSaving(false); return toast('อัปโหลดรูปไม่สำเร็จ: ' + upErr.message, 'error') }
+      imagePath = path
+    }
+    const { error } = await supabase.from('maintenance_requests').insert({
+      branch_id: f.branch_id,
+      room_id: f.room_id || null,
+      reported_by: profile.id,
+      title: f.title.trim(),
+      category: f.category,
+      priority: f.priority,
+      description: f.description.trim() || null,
+      image_url: imagePath,
+      status: 'open',
+    })
+    setSaving(false)
+    if (error) return toast('บันทึกไม่สำเร็จ: ' + error.message, 'error')
+    toast('แจ้งซ่อมเรียบร้อย')
+    onDone()
+  }
+
+  return (
+    <Modal open onClose={onClose} title="แจ้งซ่อม / แจ้งปัญหา"
+      footer={<>
+        <Button variant="ghost" onClick={onClose}>ยกเลิก</Button>
+        <Button onClick={submit} disabled={saving}>{saving ? <Spinner className="w-5 h-5" /> : 'ส่งแจ้งซ่อม'}</Button>
+      </>}
+    >
+      <div className="grid sm:grid-cols-2 gap-3">
+        <Field label="สาขา" required>
+          <Select value={f.branch_id} onChange={(e) => setF({ ...f, branch_id: e.target.value, room_id: '' })}>
+            <option value="">เลือกสาขา</option>
+            {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="ห้อง (ถ้ามี)">
+          <Select value={f.room_id} onChange={(e) => setF({ ...f, room_id: e.target.value })}>
+            <option value="">ไม่ระบุห้อง / ส่วนกลาง</option>
+            {rooms.map((r) => <option key={r.id} value={r.id}>ห้อง {r.room_number}</option>)}
+          </Select>
+        </Field>
+      </div>
+      <Field label="หัวข้อปัญหา" required>
+        <Input value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} placeholder="เช่น ก๊อกน้ำรั่ว, ไฟดับ" />
+      </Field>
+      <div className="grid sm:grid-cols-2 gap-3">
+        <Field label="หมวด">
+          <Select value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>
+            {MR_CATS.map((c) => <option key={c} value={c}>{c}</option>)}
+          </Select>
+        </Field>
+        <Field label="ความเร่งด่วน">
+          <Select value={f.priority} onChange={(e) => setF({ ...f, priority: e.target.value })}>
+            {Object.entries(MR_PRIORITY).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </Select>
+        </Field>
+      </div>
+      <Field label="รายละเอียด">
+        <Textarea value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} placeholder="อธิบายปัญหาเพิ่มเติม" />
+      </Field>
+      <Field label="รูปภาพ (ถ้ามี)">
+        <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files[0])} className="block w-full text-sm text-slate-600 file:mr-3 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:bg-brand-50 file:text-brand file:font-semibold" />
+        {file && <p className="text-xs text-slate-400 mt-1">เลือกแล้ว: {file.name}</p>}
+      </Field>
+    </Modal>
+  )
+}
+
+/* ============================================================
    ROOT
    ============================================================ */
 function Root() {
@@ -3222,6 +3525,7 @@ export default function App() {
     <ToastProvider>
       <Root />
       <InstallButton />
+      <InvoiceDocViewer />
     </ToastProvider>
   )
 }
