@@ -309,21 +309,26 @@ function Login() {
    APP SHELL — sidebar + routing
    ============================================================ */
 const NAV = [
-  { key: 'dashboard', label: 'แดชบอร์ด', icon: Icon.dashboard, roles: ['admin', 'collector', 'water_staff'] },
-  { key: 'report', label: 'รายงาน', icon: Icon.list, roles: ['admin', 'collector'] },
-  { key: 'branches', label: 'จัดการสาขา', icon: Icon.branch, roles: ['admin'] },
-  { key: 'rooms', label: 'จัดการห้องเช่า', icon: Icon.room, roles: ['admin', 'collector', 'water_staff'] },
-  { key: 'tenants', label: 'จัดการผู้เช่า', icon: Icon.tenant, roles: ['admin', 'collector', 'water_staff'] },
-  { key: 'meter', label: 'จดมิเตอร์น้ำ', icon: Icon.meter, roles: ['admin', 'water_staff'] },
-  { key: 'maintenance', label: 'แจ้งซ่อม', icon: Icon.wrench, roles: ['admin', 'collector', 'water_staff'] },
-  { key: 'issue', label: 'ออกบิล', icon: Icon.invoice, roles: ['admin', 'collector'] },
-  { key: 'receive', label: 'รับชำระเงิน', icon: Icon.pay, roles: ['admin', 'collector'] },
-  { key: 'tracking', label: 'ติดตามบิล', icon: Icon.list, roles: ['admin', 'collector', 'water_staff'] },
-  { key: 'sendline', label: 'ส่ง LINE', icon: Icon.line, roles: ['admin', 'collector'] },
-  { key: 'finance', label: 'รายรับรายจ่าย', icon: Icon.money, roles: ['admin', 'collector'] },
-  { key: 'waterprice', label: 'ตั้งค่าราคาน้ำ', icon: Icon.water, roles: ['admin'] },
-  { key: 'linesettings', label: 'ตั้งค่า LINE OA', icon: Icon.line, roles: ['admin'] },
-  { key: 'staff', label: 'จัดการพนักงาน', icon: Icon.staff, roles: ['admin'] },
+  // ภาพรวม
+  { key: 'dashboard', label: 'ภาพรวม', icon: Icon.dashboard, roles: ['admin', 'collector', 'water_staff'], group: null },
+  // ห้องพัก
+  { key: 'rooms', label: 'ห้องเช่า', icon: Icon.room, roles: ['admin', 'collector', 'water_staff'], group: 'ห้องพัก' },
+  { key: 'tenants', label: 'ผู้เช่า', icon: Icon.tenant, roles: ['admin', 'collector', 'water_staff'], group: 'ห้องพัก' },
+  { key: 'maintenance', label: 'แจ้งซ่อม', icon: Icon.wrench, roles: ['admin', 'collector', 'water_staff'], group: 'ห้องพัก' },
+  // การเงิน
+  { key: 'meter', label: 'จดมิเตอร์น้ำ', icon: Icon.meter, roles: ['admin', 'water_staff'], group: 'การเงิน' },
+  { key: 'issue', label: 'ออกบิล', icon: Icon.invoice, roles: ['admin', 'collector'], group: 'การเงิน' },
+  { key: 'receive', label: 'รับชำระ', icon: Icon.pay, roles: ['admin', 'collector'], group: 'การเงิน' },
+  { key: 'tracking', label: 'ติดตามบิล', icon: Icon.list, roles: ['admin', 'collector', 'water_staff'], group: 'การเงิน' },
+  { key: 'finance', label: 'รายรับ-รายจ่าย', icon: Icon.money, roles: ['admin', 'collector'], group: 'การเงิน' },
+  // รายงาน & แจ้งเตือน
+  { key: 'report', label: 'รายงาน', icon: Icon.list, roles: ['admin', 'collector'], group: 'รายงาน' },
+  { key: 'sendline', label: 'ส่ง LINE', icon: Icon.line, roles: ['admin', 'collector'], group: 'รายงาน' },
+  // ตั้งค่า (admin)
+  { key: 'branches', label: 'สาขา & ห้อง', icon: Icon.branch, roles: ['admin'], group: 'ตั้งค่า' },
+  { key: 'staff', label: 'พนักงาน', icon: Icon.staff, roles: ['admin'], group: 'ตั้งค่า' },
+  { key: 'waterprice', label: 'ราคาน้ำ', icon: Icon.water, roles: ['admin'], group: 'ตั้งค่า' },
+  { key: 'linesettings', label: 'LINE OA', icon: Icon.line, roles: ['admin'], group: 'ตั้งค่า' },
 ]
 
 function Shell({ session, profile, branches, refreshBranches }) {
@@ -362,23 +367,33 @@ function Shell({ session, profile, branches, refreshBranches }) {
             <p className="text-xs text-white/60">{ROLE_LABEL[role]}</p>
           </div>
         </div>
-        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-          {items.map((n) => {
-            const active = page === n.key
-            return (
-              <button
-                key={n.key}
-                onClick={() => go(n.key)}
-                className={
-                  'w-full flex items-center gap-3 px-3.5 py-3 rounded-xl text-sm font-medium transition ' +
-                  (active ? 'bg-white text-brand shadow-sm' : 'text-white/80 hover:bg-white/10')
-                }
-              >
-                <n.icon />
-                {n.label}
-              </button>
-            )
-          })}
+        <nav className="flex-1 px-3 py-4 overflow-y-auto">
+          {(() => {
+            const seen = new Set()
+            return items.map((n) => {
+              const showGroup = n.group && !seen.has(n.group)
+              if (n.group) seen.add(n.group)
+              const active = page === n.key
+              return (
+                <React.Fragment key={n.key}>
+                  {showGroup && (
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-white/40 px-3.5 mt-4 mb-1">{n.group}</p>
+                  )}
+                  {!n.group && <div className="mb-2" />}
+                  <button
+                    onClick={() => go(n.key)}
+                    className={
+                      'w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition mb-0.5 ' +
+                      (active ? 'bg-white text-brand shadow-sm' : 'text-white/80 hover:bg-white/10')
+                    }
+                  >
+                    <n.icon />
+                    {n.label}
+                  </button>
+                </React.Fragment>
+              )
+            })
+          })()}
         </nav>
         <div className="px-3 py-4 border-t border-white/10">
           <div className="px-3.5 mb-3">
