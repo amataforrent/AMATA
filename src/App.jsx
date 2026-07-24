@@ -1219,7 +1219,30 @@ function Staff({ toast }) {
     setEditing({
       id: s.id, full_name: s.full_name || '', phone: s.phone || '', role: s.role,
       branchIds: userBranches.filter((x) => x.user_id === s.id).map((x) => x.branch_id),
+      newPassword: '',
     })
+
+  const removeStaff = async (s) => {
+    if (!confirm(`ลบพนักงาน "${s.full_name || s.email}" ออกจากระบบถาวร?`)) return
+    try {
+      await callEdgeFn('manage-staff', { action: 'delete', staff_id: s.id })
+      toast('ลบพนักงานเรียบร้อย')
+      load()
+    } catch (e) { toast('ลบไม่สำเร็จ: ' + e.message, 'error') }
+  }
+
+  const resetPassword = async () => {
+    if (!editing.newPassword || editing.newPassword.length < 6) {
+      return toast('รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร', 'error')
+    }
+    setSaving(true)
+    try {
+      await callEdgeFn('manage-staff', { action: 'reset_password', staff_id: editing.id, new_password: editing.newPassword })
+      toast('เปลี่ยนรหัสผ่านเรียบร้อย')
+      setEditing({ ...editing, newPassword: '' })
+    } catch (e) { toast('เปลี่ยนรหัสผ่านไม่สำเร็จ: ' + e.message, 'error') }
+    setSaving(false)
+  }
 
   const saveEdit = async (e) => {
     e.preventDefault()
@@ -1279,6 +1302,7 @@ function Staff({ toast }) {
                 <button className="text-xs flex-1 py-1 text-amber-600" onClick={() => toggleActive(s)}>
                   {s.is_active ? 'ปิดใช้งาน' : 'เปิดใช้งาน'}
                 </button>
+                <button className="text-xs flex-1 py-1 text-red-600" onClick={() => removeStaff(s)}>ลบ</button>
               </div>
             </div>
           )
@@ -1318,6 +1342,14 @@ function Staff({ toast }) {
                 <BranchPicker branches={branches} value={editing.branchIds} onChange={(ids) => setEditing({ ...editing, branchIds: ids })} />
               </Field>
             )}
+            <div className="pt-3 border-t border-slate-100">
+              <Field label="เปลี่ยนรหัสผ่านใหม่ (ไม่กรอกถ้าไม่ต้องการเปลี่ยน)">
+                <div className="flex gap-2">
+                  <Input type="text" value={editing.newPassword} onChange={(e) => setEditing({ ...editing, newPassword: e.target.value })} placeholder="อย่างน้อย 6 ตัวอักษร" />
+                  <Button type="button" variant="ghost" onClick={resetPassword} disabled={saving}>ตั้งรหัสใหม่</Button>
+                </div>
+              </Field>
+            </div>
           </form>
         )}
       </Modal>
