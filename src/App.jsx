@@ -28,6 +28,12 @@ const STATUS_STYLE = {
 const fmtBaht = (n) =>
   (Number(n) || 0).toLocaleString('th-TH', { minimumFractionDigits: 0 }) + ' ฿'
 
+// เรียงเลขห้องแบบธรรมชาติ เช่น 1, 2, 10 (ไม่ใช่ 1, 10, 2 แบบเรียงตัวอักษร)
+const naturalSortRooms = (rooms) =>
+  [...(rooms || [])].sort((a, b) =>
+    String(a.room_number || '').localeCompare(String(b.room_number || ''), 'th', { numeric: true, sensitivity: 'base' })
+  )
+
 // เรียก Supabase Edge Function (แนบ access token)
 async function callEdgeFn(name, body) {
   const { data: { session } } = await supabase.auth.getSession()
@@ -777,7 +783,7 @@ function Rooms({ profile, branches, toast }) {
       supabase.from('room_types').select('*'),
       supabase.from('tenants').select('id, full_name, room_id, status').eq('status', 'active'),
     ])
-    setRooms(r || [])
+    setRooms(naturalSortRooms(r))
     setTypes(t || [])
     setTenants(tn || [])
     setLoading(false)
@@ -963,7 +969,7 @@ function Tenants({ profile, branches, toast }) {
       supabase.from('rooms').select('id, room_number, branch_id, status'),
     ])
     setTenants(tn || [])
-    setRooms(r || [])
+    setRooms(naturalSortRooms(r))
     setLoading(false)
   }, [])
   useEffect(() => {
@@ -1651,7 +1657,7 @@ function WaterMeter({ profile, branches, toast }) {
     const occupied = new Set((tenants || []).map((t) => t.room_id))
     const key = (y, m) => y * 12 + m
     const selKey = key(year, month)
-    const list = (rooms || [])
+    const list = naturalSortRooms(rooms)
       .filter((r) => occupied.has(r.id))
       .map((r) => {
         const roomLogs = (logs || []).filter((l) => l.room_id === r.id)
@@ -1790,7 +1796,7 @@ function IssueInvoices({ profile, branches, toast }) {
     const tenantOf = (rid) => tenants?.find((t) => t.room_id === rid)
     const meterOf = (rid) => meters?.find((m) => m.room_id === rid)
     const invoiceOf = (rid) => (invoices || []).find((i) => i.room_id === rid)
-    const list = (rooms || [])
+    const list = naturalSortRooms(rooms)
       .map((r) => {
         const tenant = tenantOf(r.id)
         if (!tenant) return null
@@ -3690,8 +3696,8 @@ function MaintenanceModal({ profile, branches, onClose, onDone, toast }) {
 
   useEffect(() => {
     if (!f.branch_id) { setRooms([]); return }
-    supabase.from('rooms').select('id, room_number').eq('branch_id', f.branch_id).order('room_number')
-      .then(({ data }) => setRooms(data || []))
+    supabase.from('rooms').select('id, room_number').eq('branch_id', f.branch_id)
+      .then(({ data }) => setRooms(naturalSortRooms(data)))
   }, [f.branch_id])
 
   const submit = async () => {
