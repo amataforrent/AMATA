@@ -319,6 +319,7 @@ const NAV = [
   { key: 'meter', label: 'จดมิเตอร์น้ำ', icon: Icon.meter, roles: ['admin', 'water_staff'], group: 'การเงิน' },
   { key: 'issue', label: 'ออกบิล', icon: Icon.invoice, roles: ['admin', 'collector'], group: 'การเงิน' },
   { key: 'receive', label: 'รับชำระ', icon: Icon.pay, roles: ['admin', 'collector'], group: 'การเงิน' },
+  { key: 'pendingslips', label: 'สลิปรอตรวจสอบ', icon: Icon.pay, roles: ['admin', 'collector'], group: 'การเงิน' },
   { key: 'tracking', label: 'ติดตามบิล', icon: Icon.list, roles: ['admin', 'collector', 'water_staff'], group: 'การเงิน' },
   { key: 'finance', label: 'รายรับ-รายจ่าย', icon: Icon.money, roles: ['admin', 'collector'], group: 'การเงิน' },
   // รายงาน & แจ้งเตือน
@@ -346,6 +347,12 @@ function Shell({ session, profile, branches, refreshBranches }) {
     setPage(k)
     setSidebarOpen(false)
   }
+
+  useEffect(() => {
+    const h = (e) => go(e.detail)
+    window.addEventListener('app-navigate', h)
+    return () => window.removeEventListener('app-navigate', h)
+  }, [])
 
   const branchNames = branches.map((b) => b.name).join(', ') || '—'
 
@@ -439,6 +446,7 @@ function Shell({ session, profile, branches, refreshBranches }) {
           {page === 'maintenance' && <Maintenance profile={profile} branches={branches} toast={toast} />}
           {page === 'issue' && (profile.role === 'admin' || profile.role === 'collector') && <IssueInvoices profile={profile} branches={branches} toast={toast} />}
           {page === 'receive' && (profile.role === 'admin' || profile.role === 'collector') && <ReceivePayment profile={profile} branches={branches} toast={toast} />}
+          {page === 'pendingslips' && (profile.role === 'admin' || profile.role === 'collector') && <PendingSlips profile={profile} branches={branches} toast={toast} />}
           {page === 'tracking' && <InvoiceTracking profile={profile} branches={branches} toast={toast} />}
           {page === 'sendline' && (profile.role === 'admin' || profile.role === 'collector') && <SendLine profile={profile} branches={branches} toast={toast} />}
           {page === 'finance' && (profile.role === 'admin' || profile.role === 'collector') && <Finance profile={profile} branches={branches} toast={toast} />}
@@ -1607,6 +1615,8 @@ function WaterPrice({ profile, branches, toast }) {
   )
 }
 
+const navigateTo = (page) => window.dispatchEvent(new CustomEvent('app-navigate', { detail: page }))
+
 /* ============================================================
    จดมิเตอร์น้ำ (water_staff + admin)
    ============================================================ */
@@ -1619,10 +1629,12 @@ function WaterMeter({ profile, branches, toast }) {
   const [rows, setRows] = useState([]) // {room, prev, current, existingId}
   const [setting, setSetting] = useState({ price_per_unit: 18, meter_maintenance_fee: 50 })
   const [saving, setSaving] = useState(false)
+  const [justSaved, setJustSaved] = useState(false)
 
   const load = useCallback(async () => {
     if (!branchId) return
     setLoading(true)
+    setJustSaved(false)
     // ราคาน้ำล่าสุด
     const { data: ps } = await supabase
       .from('water_price_settings').select('*').eq('branch_id', branchId)
@@ -1684,6 +1696,8 @@ function WaterMeter({ profile, branches, toast }) {
     setSaving(false)
     if (error) return toast('บันทึกไม่สำเร็จ: ' + error.message, 'error')
     toast(`บันทึกมิเตอร์ ${toSave.length} ห้องเรียบร้อย`)
+    sessionStorage.setItem('lastPeriod', JSON.stringify({ branchId, month, year }))
+    setJustSaved(true)
     load()
   }
 
@@ -1732,7 +1746,12 @@ function WaterMeter({ profile, branches, toast }) {
               )
             })}
           </div>
-          <div className="sticky bottom-0 bg-slate-100 pt-3">
+          <div className="sticky bottom-0 bg-slate-100 pt-3 space-y-2">
+            {justSaved && (
+              <button onClick={() => navigateTo('issue')} className="w-full py-3.5 rounded-xl bg-emerald-600 text-white font-bold flex items-center justify-center gap-2">
+                ✓ บันทึกแล้ว — ไปออกบิลเลย →
+              </button>
+            )}
             <Button onClick={saveAll} disabled={saving} className="w-full">
               {saving ? <Spinner className="w-5 h-5" /> : `บันทึกทั้งหมด (${rows.filter((r) => r.current !== '').length}/${rows.length} ห้อง)`}
             </Button>
@@ -1748,12 +1767,14 @@ function WaterMeter({ profile, branches, toast }) {
    ============================================================ */
 function IssueInvoices({ profile, branches, toast }) {
   const now = new Date()
-  const [branchId, setBranchId] = useState(branches[0]?.id || '')
-  const [month, setMonth] = useState(now.getMonth() + 1)
-  const [year, setYear] = useState(now.getFullYear())
+  const savedPeriod = (() => { try { return JSON.parse(sessionStorage.getItem('lastPeriod')) } catch { return null } })()
+  const [branchId, setBranchId] = useState(savedPeriod?.branchId || branches[0]?.id || '')
+  const [month, setMonth] = useState(savedPeriod?.month || now.getMonth() + 1)
+  const [year, setYear] = useState(savedPeriod?.year || now.getFullYear())
   const [loading, setLoading] = useState(false)
   const [rows, setRows] = useState([])
   const [busy, setBusy] = useState(false)
+  const [justIssued, setJustIssued] = useState(false)
 
   const load = useCallback(async () => {
     if (!branchId) return
@@ -1763,25 +1784,27 @@ function IssueInvoices({ profile, branches, toast }) {
       supabase.from('room_types').select('id, price'),
       supabase.from('tenants').select('id, full_name, room_id').eq('branch_id', branchId).eq('status', 'active'),
       supabase.from('water_meter_logs').select('*').eq('branch_id', branchId).eq('month', month).eq('year', year),
-      supabase.from('invoices').select('id, room_id').eq('branch_id', branchId).eq('month', month).eq('year', year),
+      supabase.from('invoices').select('*').eq('branch_id', branchId).eq('month', month).eq('year', year),
     ])
     const priceOf = (tid) => types?.find((t) => t.id === tid)?.price || 0
     const tenantOf = (rid) => tenants?.find((t) => t.room_id === rid)
     const meterOf = (rid) => meters?.find((m) => m.room_id === rid)
-    const invoiced = new Set((invoices || []).map((i) => i.room_id))
+    const invoiceOf = (rid) => (invoices || []).find((i) => i.room_id === rid)
     const list = (rooms || [])
       .map((r) => {
         const tenant = tenantOf(r.id)
         if (!tenant) return null
         const meter = meterOf(r.id)
+        const inv = invoiceOf(r.id)
         return {
           room: r, tenant,
           rent: Number(priceOf(r.room_type_id)),
           water: meter ? Number(meter.total_water_cost) : 0,
           waterUnits: meter ? Number(meter.units_used) : null,
           other: '', otherNote: '',
-          selected: !invoiced.has(r.id),
-          already: invoiced.has(r.id),
+          selected: !inv,
+          already: !!inv,
+          invoice: inv || null,
         }
       })
       .filter(Boolean)
@@ -1789,6 +1812,7 @@ function IssueInvoices({ profile, branches, toast }) {
     setLoading(false)
   }, [branchId, month, year])
   useEffect(() => { load() }, [load])
+  const [editingInv, setEditingInv] = useState(null)
 
   const upd = (rid, patch) => setRows((rs) => rs.map((x) => (x.room.id === rid ? { ...x, ...patch } : x)))
   const total = (r) => r.rent + r.water + (Number(r.other) || 0)
@@ -1822,6 +1846,7 @@ function IssueInvoices({ profile, branches, toast }) {
     }
     setBusy(false)
     toast(`ออกบิลสำเร็จ ${ok} ใบ${fail ? ` · ไม่สำเร็จ ${fail}` : ''}`, fail ? 'info' : 'success')
+    if (ok > 0) { sessionStorage.setItem('lastPeriod', JSON.stringify({ branchId, month, year })); setJustIssued(true) }
     load()
   }
 
@@ -1850,7 +1875,14 @@ function IssueInvoices({ profile, branches, toast }) {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2">
                       <p className="font-bold text-slate-800">ห้อง {r.room.room_number} <span className="font-normal text-slate-500 text-sm">· {r.tenant.full_name}</span></p>
-                      {r.already && <span className="text-[11px] font-semibold px-2 py-1 rounded-full bg-emerald-100 text-emerald-700">ออกบิลแล้ว</span>}
+                      {r.already && (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-[11px] font-semibold px-2 py-1 rounded-full bg-emerald-100 text-emerald-700">ออกบิลแล้ว</span>
+                          {r.invoice.status !== 'paid' && (
+                            <button className="text-xs text-brand font-semibold" onClick={() => setEditingInv(r.invoice)}>แก้ไข</button>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <div className="mt-1 text-sm text-slate-600 flex flex-wrap gap-x-4">
                       <span>ค่าเช่า {fmtBaht(r.rent)}</span>
@@ -1869,7 +1901,13 @@ function IssueInvoices({ profile, branches, toast }) {
             ))}
           </div>
           {pending.length > 0 && (
-            <div className="sticky bottom-0 bg-slate-100 pt-3">
+            <div className="sticky bottom-0 bg-slate-100 pt-3 space-y-2">
+              {justIssued && (
+                <div className="flex gap-2">
+                  <button onClick={() => navigateTo('sendline')} className="flex-1 py-3.5 rounded-xl bg-emerald-600 text-white font-bold text-sm">💬 ส่ง LINE แจ้งยอดเลย →</button>
+                  <button onClick={() => navigateTo('receive')} className="flex-1 py-3.5 rounded-xl bg-white border-2 border-brand text-brand font-bold text-sm">💰 ไปรับชำระ →</button>
+                </div>
+              )}
               <Button onClick={issue} disabled={busy} className="w-full">
                 {busy ? <Spinner className="w-5 h-5" /> : `ออกบิลที่เลือก (${rows.filter((r) => r.selected && !r.already).length} ห้อง)`}
               </Button>
@@ -1877,7 +1915,63 @@ function IssueInvoices({ profile, branches, toast }) {
           )}
         </>
       )}
+      {editingInv && (
+        <EditInvoiceModal inv={editingInv} onClose={() => setEditingInv(null)} onDone={() => { setEditingInv(null); load() }} toast={toast} />
+      )}
     </div>
+  )
+}
+
+function EditInvoiceModal({ inv, onClose, onDone, toast }) {
+  const [f, setF] = useState({
+    month: inv.month, year: inv.year,
+    rent_amount: String(inv.rent_amount), water_cost: String(inv.water_cost),
+    other_fees: String(inv.other_fees || 0), other_fees_note: inv.other_fees_note || '',
+    due_date: inv.due_date || '',
+  })
+  const [saving, setSaving] = useState(false)
+  const total = Number(f.rent_amount || 0) + Number(f.water_cost || 0) + Number(f.other_fees || 0)
+
+  const submit = async () => {
+    setSaving(true)
+    const { error } = await supabase.from('invoices').update({
+      month: Number(f.month), year: Number(f.year),
+      rent_amount: Number(f.rent_amount) || 0,
+      water_cost: Number(f.water_cost) || 0,
+      other_fees: Number(f.other_fees) || 0,
+      other_fees_note: f.other_fees_note || null,
+      due_date: f.due_date || null,
+    }).eq('id', inv.id)
+    setSaving(false)
+    if (error) return toast('แก้ไขไม่สำเร็จ: ' + error.message, 'error')
+    toast('แก้ไขบิลเรียบร้อย')
+    onDone()
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`แก้ไขบิล ${inv.invoice_number}`}
+      footer={<>
+        <Button variant="ghost" onClick={onClose}>ยกเลิก</Button>
+        <Button onClick={submit} disabled={saving}>{saving ? <Spinner className="w-5 h-5" /> : 'บันทึก'}</Button>
+      </>}
+    >
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="เดือน">
+          <Select value={f.month} onChange={(e) => setF({ ...f, month: e.target.value })}>
+            {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => <option key={m} value={m}>{monthLabel(m)}</option>)}
+          </Select>
+        </Field>
+        <Field label="ปี"><Input type="number" value={f.year} onChange={(e) => setF({ ...f, year: e.target.value })} /></Field>
+      </div>
+      <Field label="ค่าเช่า (บาท)"><Input type="number" min="0" value={f.rent_amount} onChange={(e) => setF({ ...f, rent_amount: e.target.value })} /></Field>
+      <Field label="ค่าน้ำ (บาท)"><Input type="number" min="0" value={f.water_cost} onChange={(e) => setF({ ...f, water_cost: e.target.value })} /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="ค่าอื่น ๆ (บาท)"><Input type="number" min="0" value={f.other_fees} onChange={(e) => setF({ ...f, other_fees: e.target.value })} /></Field>
+        <Field label="หมายเหตุค่าอื่น"><Input value={f.other_fees_note} onChange={(e) => setF({ ...f, other_fees_note: e.target.value })} /></Field>
+      </div>
+      <Field label="วันครบกำหนดชำระ"><Input type="date" value={f.due_date} onChange={(e) => setF({ ...f, due_date: e.target.value })} /></Field>
+      <p className="font-bold text-brand pt-2">ยอดรวมใหม่: {fmtBaht(total)}</p>
+    </Modal>
   )
 }
 
@@ -2038,7 +2132,10 @@ function openInvoiceDoc(inv, ctx, isReceipt) {
    รับชำระเงิน (collector + admin)
    ============================================================ */
 function ReceivePayment({ profile, branches, toast }) {
+  const now = new Date()
   const [branchId, setBranchId] = useState('')
+  const [month, setMonth] = useState(0) // 0 = ทุกเดือน
+  const [year, setYear] = useState(now.getFullYear())
   const [q, setQ] = useState('')
   const [loading, setLoading] = useState(true)
   const [invoices, setInvoices] = useState([])
@@ -2051,6 +2148,8 @@ function ReceivePayment({ profile, branches, toast }) {
     setLoading(true)
     let inv = supabase.from('invoices').select('*').in('status', ['pending', 'overdue']).order('created_at', { ascending: false })
     if (branchId) inv = inv.eq('branch_id', branchId)
+    if (month) inv = inv.eq('month', month)
+    if (year) inv = inv.eq('year', year)
     const [{ data: i }, { data: r }, { data: t }, { data: m }] = await Promise.all([
       inv,
       supabase.from('rooms').select('id, room_number'),
@@ -2062,7 +2161,7 @@ function ReceivePayment({ profile, branches, toast }) {
     setTenants(t || [])
     setMeters(m || [])
     setLoading(false)
-  }, [branchId])
+  }, [branchId, month, year])
   useEffect(() => { load() }, [load])
 
   const roomNo = (id) => rooms.find((x) => x.id === id)?.room_number || '-'
@@ -2082,6 +2181,13 @@ function ReceivePayment({ profile, branches, toast }) {
         <Select value={branchId} onChange={(e) => setBranchId(e.target.value)} className="!w-auto flex-1 min-w-[150px]">
           <option value="">ทุกสาขา</option>
           {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </Select>
+        <Select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="!w-auto flex-1 min-w-[130px]">
+          <option value={0}>ทุกเดือน</option>
+          {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => <option key={m} value={m}>{monthLabel(m)}</option>)}
+        </Select>
+        <Select value={year} onChange={(e) => setYear(Number(e.target.value))} className="!w-auto w-[100px]">
+          {Array.from({ length: 5 }, (_, i) => now.getFullYear() - 1 + i).map((y) => <option key={y} value={y}>{y + 543}</option>)}
         </Select>
         <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหา เลขห้อง / ชื่อ / เลขที่บิล" className="flex-1 min-w-[180px]" />
       </div>
@@ -2128,6 +2234,7 @@ function ReceivePayment({ profile, branches, toast }) {
 function PaymentModal({ inv, profile, ctx, onClose, onDone, toast }) {
   const [method, setMethod] = useState('cash')
   const [amount, setAmount] = useState(String(inv.total_amount))
+  const [fullAmount, setFullAmount] = useState(true)
   const [notes, setNotes] = useState('')
   const [file, setFile] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -2154,7 +2261,13 @@ function PaymentModal({ inv, profile, ctx, onClose, onDone, toast }) {
       received_by: profile.id,
     })
     if (payErr) { setSaving(false); return toast('บันทึกไม่สำเร็จ: ' + payErr.message, 'error') }
-    await supabase.from('invoices').update({ status: 'paid' }).eq('id', inv.id)
+    // ตรวจสอบยอดสะสมที่ชำระแล้วเทียบกับยอดบิล ก่อนเปลี่ยนสถานะ
+    const { data: prevPayments } = await supabase.from('payments').select('amount_paid').eq('invoice_id', inv.id)
+    const totalPaidSoFar = (prevPayments || []).reduce((a, p) => a + Number(p.amount_paid), 0)
+    const isFullyPaid = totalPaidSoFar >= Number(inv.total_amount)
+    if (isFullyPaid) {
+      await supabase.from('invoices').update({ status: 'paid' }).eq('id', inv.id)
+    }
     // บันทึกรายรับอัตโนมัติ
     await supabase.from('transactions').insert({
       branch_id: inv.branch_id,
@@ -2166,7 +2279,14 @@ function PaymentModal({ inv, profile, ctx, onClose, onDone, toast }) {
       created_by: profile.id,
     })
     setSaving(false)
-    toast('รับชำระเรียบร้อย')
+    if (isFullyPaid) {
+      toast('รับชำระครบยอด เปลี่ยนสถานะเป็น "ชำระแล้ว"')
+    } else {
+      const remain = Number(inv.total_amount) - totalPaidSoFar
+      toast(`บันทึกการชำระแล้ว แต่ยังขาดอีก ${fmtBaht(remain)} — บิลยังเป็น "รอชำระ"`, 'error')
+      onDone()
+      return
+    }
     // ออกใบเสร็จทันที
     openInvoiceDoc(inv, { ...ctx, paidMethod: { cash: 'เงินสด', transfer: 'โอน', qr: 'QR' }[method], paidAt: new Date().toLocaleDateString('th-TH') }, true)
     onDone()
@@ -2205,7 +2325,16 @@ function PaymentModal({ inv, profile, ctx, onClose, onDone, toast }) {
           ))}
         </div>
       </Field>
-      <Field label="จำนวนเงินที่รับ (บาท)"><Input type="number" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+      <Field label="จำนวนเงินที่รับ (บาท)">
+        <div className="flex items-center gap-2 mb-2">
+          <button type="button" onClick={() => { setFullAmount(true); setAmount(String(inv.total_amount)) }} className={'flex-1 py-2.5 rounded-xl text-sm font-semibold border min-h-[44px] ' + (fullAmount ? 'bg-brand text-white border-brand' : 'bg-white text-slate-600 border-slate-300')}>ชำระเต็มจำนวน {fmtBaht(inv.total_amount)}</button>
+          <button type="button" onClick={() => setFullAmount(false)} className={'flex-1 py-2.5 rounded-xl text-sm font-semibold border min-h-[44px] ' + (!fullAmount ? 'bg-brand text-white border-brand' : 'bg-white text-slate-600 border-slate-300')}>ชำระบางส่วน</button>
+        </div>
+        {!fullAmount && <Input type="number" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} />}
+      </Field>
+      {Number(amount) < Number(inv.total_amount) && (
+        <p className="text-xs text-amber-600 -mt-2 mb-1">⚠️ ยอดที่กรอกน้อยกว่ายอดบิล {fmtBaht(inv.total_amount)} — ระบบจะไม่เปลี่ยนสถานะเป็น "ชำระแล้ว" จนกว่าจะได้ยอดครบ</p>
+      )}
       {method !== 'cash' && (
         <Field label="อัปโหลดสลิป (ภาพ)">
           <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files[0])} className="block w-full text-sm text-slate-600 file:mr-3 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:bg-brand-50 file:text-brand file:font-semibold" />
@@ -2216,6 +2345,160 @@ function PaymentModal({ inv, profile, ctx, onClose, onDone, toast }) {
       <button type="button" onClick={sendReceiptLine} disabled={sendingLine} className="text-sm text-brand font-semibold disabled:opacity-50">
         {sendingLine ? 'กำลังส่ง...' : '💬 ส่งใบเสร็จทาง LINE (หลังบันทึกแล้ว)'}
       </button>
+    </Modal>
+  )
+}
+
+/* ============================================================
+   สลิปรอตรวจสอบ (ลูกค้าส่งเข้า LINE โดยตรง)
+   ============================================================ */
+function PendingSlips({ profile, branches, toast }) {
+  const [branchId, setBranchId] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [slips, setSlips] = useState([])
+  const [rooms, setRooms] = useState([])
+  const [tenants, setTenants] = useState([])
+  const [invoices, setInvoices] = useState([])
+  const [urls, setUrls] = useState({})
+  const [applying, setApplying] = useState(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    let q = supabase.from('line_pending_slips').select('*').eq('status', 'pending').order('created_at', { ascending: false })
+    if (branchId) q = q.eq('branch_id', branchId)
+    const [{ data: s }, { data: r }, { data: t }] = await Promise.all([
+      q,
+      supabase.from('rooms').select('id, room_number'),
+      supabase.from('tenants').select('id, full_name'),
+    ])
+    setSlips(s || [])
+    setRooms(r || [])
+    setTenants(t || [])
+    // เตรียม signed url รูป
+    const entries = await Promise.all((s || []).map(async (x) => {
+      const { data } = await supabase.storage.from('slips').createSignedUrl(x.image_path, 3600)
+      return [x.id, data?.signedUrl]
+    }))
+    setUrls(Object.fromEntries(entries))
+    setLoading(false)
+  }, [branchId])
+  useEffect(() => { load() }, [load])
+
+  const roomNo = (id) => rooms.find((x) => x.id === id)?.room_number || '-'
+  const tenantName = (id) => tenants.find((x) => x.id === id)?.full_name || '-'
+  const branchName = (id) => branches.find((b) => b.id === id)?.name || ''
+
+  const loadInvoicesFor = async (slip) => {
+    const { data } = await supabase.from('invoices').select('*').eq('tenant_id', slip.tenant_id).in('status', ['pending', 'overdue']).order('year', { ascending: false }).order('month', { ascending: false })
+    setInvoices(data || [])
+    setApplying(slip)
+  }
+
+  const reject = async (slip) => {
+    if (!confirm('ปฏิเสธสลิปนี้?')) return
+    await supabase.from('line_pending_slips').update({ status: 'rejected' }).eq('id', slip.id)
+    toast('ปฏิเสธสลิปแล้ว')
+    load()
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        <Select value={branchId} onChange={(e) => setBranchId(e.target.value)} className="!w-auto flex-1 min-w-[150px]">
+          <option value="">ทุกสาขา</option>
+          {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </Select>
+      </div>
+      {loading ? <FullLoader /> : slips.length === 0 ? (
+        <EmptyState icon="📥" title="ไม่มีสลิปรอตรวจสอบ" hint="สลิปที่ลูกค้าส่งเข้า LINE โดยตรงจะขึ้นที่นี่" />
+      ) : (
+        <div className="grid sm:grid-cols-2 gap-3">
+          {slips.map((s) => (
+            <div key={s.id} className="bg-white rounded-2xl border border-slate-100 p-4">
+              <p className="font-bold text-slate-800">ห้อง {roomNo(s.room_id)} · {tenantName(s.tenant_id)}</p>
+              <p className="text-xs text-slate-400 mb-2">{branchName(s.branch_id)} · {new Date(s.created_at).toLocaleString('th-TH')}</p>
+              {urls[s.id] && <a href={urls[s.id]} target="_blank" rel="noreferrer"><img src={urls[s.id]} alt="สลิป" className="rounded-lg w-full max-h-64 object-contain border border-slate-200 bg-slate-50" /></a>}
+              <div className="flex gap-2 mt-3">
+                <Button className="!py-2 !px-3 text-xs flex-1" onClick={() => loadInvoicesFor(s)}>เลือกบิลที่ตรงกัน</Button>
+                <Button variant="ghost" className="!py-2 !px-3 text-xs !text-red-600" onClick={() => reject(s)}>ปฏิเสธ</Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {applying && (
+        <ApplySlipModal
+          slip={applying}
+          invoices={invoices}
+          roomNumber={roomNo(applying.room_id)}
+          tenantName={tenantName(applying.tenant_id)}
+          profile={profile}
+          onClose={() => setApplying(null)}
+          onDone={() => { setApplying(null); load() }}
+          toast={toast}
+        />
+      )}
+    </div>
+  )
+}
+
+function ApplySlipModal({ slip, invoices, roomNumber, tenantName, profile, onClose, onDone, toast }) {
+  const [invId, setInvId] = useState(invoices[0]?.id || '')
+  const [amount, setAmount] = useState(invoices[0] ? String(invoices[0].total_amount) : '')
+  const [saving, setSaving] = useState(false)
+  const inv = invoices.find((i) => i.id === invId)
+
+  useEffect(() => { if (inv) setAmount(String(inv.total_amount)) }, [invId])
+
+  const submit = async () => {
+    if (!inv) return toast('เลือกบิลก่อน', 'error')
+    setSaving(true)
+    const { error: payErr } = await supabase.from('payments').insert({
+      invoice_id: inv.id,
+      tenant_id: inv.tenant_id,
+      branch_id: inv.branch_id,
+      payment_method: 'transfer',
+      amount_paid: Number(amount),
+      slip_image_url: slip.image_path,
+      notes: 'ยืนยันจากสลิปที่ลูกค้าส่งเข้า LINE',
+      received_by: profile.id,
+    })
+    if (payErr) { setSaving(false); return toast('บันทึกไม่สำเร็จ: ' + payErr.message, 'error') }
+    const { data: prevPayments } = await supabase.from('payments').select('amount_paid').eq('invoice_id', inv.id)
+    const totalPaidSoFar = (prevPayments || []).reduce((a, p) => a + Number(p.amount_paid), 0)
+    const isFullyPaid = totalPaidSoFar >= Number(inv.total_amount)
+    if (isFullyPaid) await supabase.from('invoices').update({ status: 'paid' }).eq('id', inv.id)
+    await supabase.from('transactions').insert({
+      branch_id: inv.branch_id, type: 'income', category: 'ค่าเช่า/ค่าน้ำ',
+      amount: Number(amount), description: `รับชำระบิล ${inv.invoice_number} ห้อง ${roomNumber} (จากสลิป LINE)`,
+      reference_id: inv.id, created_by: profile.id,
+    })
+    await supabase.from('line_pending_slips').update({ status: 'used', applied_invoice_id: inv.id }).eq('id', slip.id)
+    setSaving(false)
+    toast(isFullyPaid ? 'ยืนยันสลิปสำเร็จ บิลเป็น "ชำระแล้ว"' : 'บันทึกยอดแล้ว แต่ยังไม่ครบยอดบิล')
+    onDone()
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`ยืนยันสลิป · ห้อง ${roomNumber} · ${tenantName}`}
+      footer={<>
+        <Button variant="ghost" onClick={onClose}>ยกเลิก</Button>
+        <Button onClick={submit} disabled={saving || !inv}>{saving ? <Spinner className="w-5 h-5" /> : 'ยืนยันเป็นชำระเงิน'}</Button>
+      </>}
+    >
+      {invoices.length === 0 ? (
+        <p className="text-sm text-slate-500">ผู้เช่ารายนี้ไม่มีบิลค้างชำระ</p>
+      ) : (
+        <>
+          <Field label="บิลที่ตรงกัน">
+            <Select value={invId} onChange={(e) => setInvId(e.target.value)}>
+              {invoices.map((i) => <option key={i.id} value={i.id}>{i.invoice_number} · {monthLabel(i.month)} {i.year + 543} · {fmtBaht(i.total_amount)}</option>)}
+            </Select>
+          </Field>
+          <Field label="จำนวนเงินที่ยืนยัน (บาท)"><Input type="number" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+        </>
+      )}
     </Modal>
   )
 }
@@ -2513,9 +2796,10 @@ function LineSettings({ profile, branches, toast }) {
 function SendLine({ profile, branches, toast }) {
   const now = new Date()
   const [tab, setTab] = useState('bulk') // bulk | single | log
-  const [branchId, setBranchId] = useState(branches[0]?.id || '')
-  const [month, setMonth] = useState(now.getMonth() + 1)
-  const [year, setYear] = useState(now.getFullYear())
+  const spLine = (() => { try { return JSON.parse(sessionStorage.getItem('lastPeriod')) } catch { return null } })()
+  const [branchId, setBranchId] = useState(spLine?.branchId || branches[0]?.id || '')
+  const [month, setMonth] = useState(spLine?.month || now.getMonth() + 1)
+  const [year, setYear] = useState(spLine?.year || now.getFullYear())
   const [invoices, setInvoices] = useState([])
   const [tenants, setTenants] = useState([])
   const [rooms, setRooms] = useState([])
