@@ -440,7 +440,7 @@ function Shell({ session, profile, branches, refreshBranches }) {
         </header>
 
         <main className="flex-1 p-4 lg:p-6 max-w-6xl w-full mx-auto">
-          {page === 'board' && (profile.role === 'admin' || profile.role === 'collector') && <RoomBoard profile={profile} branches={branches} toast={toast} />}
+          {page === 'board' && (profile.role === 'admin' || profile.role === 'collector') && <RoomBoard profile={profile} branches={branches} toast={toast} onNavigate={go} />}
           {page === 'dashboard' && (role === 'admin'
             ? <AdminDashboard profile={profile} branches={branches} onNavigate={go} />
             : <Dashboard profile={profile} branches={branches} />)}
@@ -1781,11 +1781,12 @@ function WaterMeter({ profile, branches, toast }) {
 /* ============================================================
    ห้อง & บิล — ภาพรวมง่ายๆ กดเข้าเช็คสถานะ + ทำรายการในช่องเดียว
    ============================================================ */
-function RoomBoard({ profile, branches, toast }) {
+function RoomBoard({ profile, branches, toast, onNavigate }) {
   const now = new Date()
   const [branchId, setBranchId] = useState(branches[0]?.id || '')
   const [month, setMonth] = useState(now.getMonth() + 1)
   const [year, setYear] = useState(now.getFullYear())
+  const [statusFilter, setStatusFilter] = useState('all') // all | vacant | nobill | pending | overdue | paid
   const [loading, setLoading] = useState(true)
   const [rows, setRows] = useState([])
   const [selected, setSelected] = useState(null)
@@ -1874,21 +1875,26 @@ function RoomBoard({ profile, branches, toast }) {
         <PeriodPicker month={month} year={year} onMonth={setMonth} onYear={setYear} />
       </div>
 
+      <div className="flex flex-wrap gap-1.5">
+        {[['all', 'ทั้งหมด'], ['vacant', 'ห้องว่าง'], ['nobill', 'ยังไม่ออกบิล'], ['pending', 'รอชำระ'], ['overdue', 'เกินกำหนด'], ['paid', 'ชำระแล้ว']].map(([v, l]) => (
+          <button key={v} onClick={() => setStatusFilter(v)} className={'px-3 py-1.5 rounded-full text-xs font-semibold border ' + (statusFilter === v ? 'bg-brand text-white border-brand' : 'bg-white text-slate-600 border-slate-300')}>{l}</button>
+        ))}
+      </div>
+
       {loading ? <FullLoader /> : rows.length === 0 ? (
         <EmptyState icon="🏠" title="ไม่มีห้องในสาขานี้" />
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-          {rows.map((row) => {
+          {rows.filter((row) => statusFilter === 'all' || statusOf(row).key === statusFilter).map((row) => {
             const st = statusOf(row)
             return (
               <button
                 key={row.room.id}
-                onClick={() => row.tenant && setSelected(row)}
-                disabled={!row.tenant}
-                className={'text-left rounded-2xl border p-3.5 transition ' + st.cls + (row.tenant ? ' hover:shadow-md cursor-pointer' : ' cursor-default opacity-60')}
+                onClick={() => setSelected(row)}
+                className={'text-left rounded-2xl border p-3.5 transition hover:shadow-md cursor-pointer ' + st.cls}
               >
                 <p className="font-bold text-slate-800 text-lg">{row.room.room_number}</p>
-                <p className="text-xs text-slate-500 truncate">{row.tenant?.full_name || '—'}</p>
+                <p className="text-xs text-slate-500 truncate">{row.tenant?.full_name || 'ไม่มีผู้เช่า'}</p>
                 <p className="text-[11px] font-semibold mt-2 px-2 py-0.5 rounded-full inline-block bg-white/70">{st.label}</p>
                 {row.invoice && <p className="text-sm font-bold mt-1.5">{fmtBaht(row.invoice.total_amount)}</p>}
                 {row.receiptSent && <p className="text-[10.5px] font-semibold text-emerald-600 mt-1">✅ ส่งใบเสร็จแล้ว</p>}
@@ -1898,7 +1904,23 @@ function RoomBoard({ profile, branches, toast }) {
         </div>
       )}
 
-      {selected && (
+      {selected && !selected.tenant && (
+        <Modal
+          open
+          onClose={() => setSelected(null)}
+          title={`ห้อง ${selected.room.room_number} · ห้องว่าง`}
+          footer={<>
+            <Button variant="ghost" onClick={() => setSelected(null)}>ปิด</Button>
+            {onNavigate && <Button onClick={() => onNavigate('tenants')}>+ เพิ่มผู้เช่าห้องนี้</Button>}
+          </>}
+        >
+          <p className="text-sm text-slate-500">{branchName(branchId)}</p>
+          <p className="text-sm text-slate-600 mt-2">ค่าเช่าตามประเภทห้อง: {fmtBaht(selected.rent)}</p>
+          <p className="text-sm text-slate-400 mt-3">ห้องนี้ยังว่าง — กด "+ เพิ่มผู้เช่าห้องนี้" เพื่อผูกผู้เช่าใหม่</p>
+        </Modal>
+      )}
+
+      {selected && selected.tenant && (
         <Modal
           open
           onClose={() => setSelected(null)}
@@ -3315,16 +3337,23 @@ function Finance({ profile, branches, toast }) {
         </div>
       )}
 
-      {adding && <ExpenseModal profile={profile} branchId={branchId} onClose={() => setAdding(false)} onDone={() => { setAdding(false); load() }} toast={toast} />}
+      {adding && <ExpenseModal profile={profile} branchId={branchId} defaultMonth={month} defaultYear={year} onClose={() => setAdding(false)} onDone={() => { setAdding(false); load() }} toast={toast} />}
     </div>
   )
 }
 
-function ExpenseModal({ profile, branchId, onClose, onDone, toast }) {
+function ExpenseModal({ profile, branchId, defaultMonth, defaultYear, onClose, onDone, toast }) {
   const [type, setType] = useState('expense')
   const [category, setCategory] = useState(EXPENSE_CATS[0])
   const [amount, setAmount] = useState('')
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
+  const todayD = new Date()
+  const initialDate = (() => {
+    if (defaultYear && defaultMonth && (defaultYear !== todayD.getFullYear() || defaultMonth !== todayD.getMonth() + 1)) {
+      return `${defaultYear}-${String(defaultMonth).padStart(2, '0')}-01`
+    }
+    return todayD.toISOString().slice(0, 10)
+  })()
+  const [date, setDate] = useState(initialDate)
   const [description, setDescription] = useState('')
   const [file, setFile] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -3378,7 +3407,7 @@ function ExpenseModal({ profile, branchId, onClose, onDone, toast }) {
       </Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label="จำนวนเงิน (บาท)" required><Input type="number" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
-        <Field label="วันที่"><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="วันที่ (ต้องอยู่ในเดือนที่กำลังดู ไม่งั้นจะไม่ขึ้นในรายการ)"><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
       </div>
       <Field label="รายละเอียด"><Input value={description} onChange={(e) => setDescription(e.target.value)} /></Field>
       <Field label="รูปใบเสร็จ (ถ้ามี)">
