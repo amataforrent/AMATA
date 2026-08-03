@@ -317,6 +317,7 @@ function Login() {
 const NAV = [
   // ภาพรวม
   { key: 'dashboard', label: 'ภาพรวม', icon: Icon.dashboard, roles: ['admin', 'collector', 'water_staff'], group: null },
+  { key: 'board', label: 'ห้อง & บิล (ดูง่าย)', icon: Icon.invoice, roles: ['admin', 'collector'], group: null },
   // ห้องพัก
   { key: 'rooms', label: 'ห้องเช่า', icon: Icon.room, roles: ['admin', 'collector', 'water_staff'], group: 'ห้องพัก' },
   { key: 'tenants', label: 'ผู้เช่า', icon: Icon.tenant, roles: ['admin', 'collector', 'water_staff'], group: 'ห้องพัก' },
@@ -441,6 +442,7 @@ function Shell({ session, profile, branches, refreshBranches }) {
         </header>
 
         <main className="flex-1 p-4 lg:p-6 max-w-6xl w-full mx-auto">
+          {page === 'board' && (profile.role === 'admin' || profile.role === 'collector') && <RoomBoard profile={profile} branches={branches} toast={toast} />}
           {page === 'dashboard' && (role === 'admin'
             ? <AdminDashboard profile={profile} branches={branches} onNavigate={go} />
             : <Dashboard profile={profile} branches={branches} />)}
@@ -1763,6 +1765,173 @@ function WaterMeter({ profile, branches, toast }) {
             </Button>
           </div>
         </>
+      )}
+    </div>
+  )
+}
+
+/* ============================================================
+   ห้อง & บิล — ภาพรวมง่ายๆ กดเข้าเช็คสถานะ + ทำรายการในช่องเดียว
+   ============================================================ */
+function RoomBoard({ profile, branches, toast }) {
+  const now = new Date()
+  const [branchId, setBranchId] = useState(branches[0]?.id || '')
+  const [month, setMonth] = useState(now.getMonth() + 1)
+  const [year, setYear] = useState(now.getFullYear())
+  const [loading, setLoading] = useState(true)
+  const [rows, setRows] = useState([])
+  const [selected, setSelected] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [modal, setModal] = useState(null) // 'pay' | null
+
+  const load = useCallback(async () => {
+    if (!branchId) return
+    setLoading(true)
+    const [{ data: rooms }, { data: types }, { data: tenants }, { data: meters }, { data: invoices }] = await Promise.all([
+      supabase.from('rooms').select('id, room_number, room_type_id, branch_id').eq('branch_id', branchId),
+      supabase.from('room_types').select('id, price'),
+      supabase.from('tenants').select('id, full_name, room_id').eq('branch_id', branchId).eq('status', 'active'),
+      supabase.from('water_meter_logs').select('*').eq('branch_id', branchId).eq('month', month).eq('year', year),
+      supabase.from('invoices').select('*').eq('branch_id', branchId).eq('month', month).eq('year', year),
+    ])
+    const priceOf = (tid) => types?.find((t) => t.id === tid)?.price || 0
+    const list = naturalSortRooms(rooms).map((r) => {
+      const tenant = tenants?.find((t) => t.room_id === r.id)
+      const meter = meters?.find((m) => m.room_id === r.id)
+      const inv = (invoices || []).find((i) => i.room_id === r.id)
+      return {
+        room: r, tenant,
+        rent: Number(priceOf(r.room_type_id)),
+        water: meter ? Number(meter.total_water_cost) : 0,
+        waterUnits: meter ? Number(meter.units_used) : null,
+        invoice: inv || null,
+      }
+    })
+    setRows(list)
+    setSelected((s) => (s ? list.find((x) => x.room.id === s.room.id) || null : null))
+    setLoading(false)
+  }, [branchId, month, year])
+  useEffect(() => { load() }, [load])
+
+  const branchName = (id) => branches.find((b) => b.id === id)?.name || ''
+
+  const statusOf = (row) => {
+    if (!row.tenant) return { key: 'vacant', label: 'ห้องว่าง', cls: 'bg-slate-100 text-slate-400 border-slate-200' }
+    if (!row.invoice) return { key: 'nobill', label: 'ยังไม่ออกบิล', cls: 'bg-slate-100 text-slate-500 border-slate-300' }
+    if (row.invoice.status === 'paid') return { key: 'paid', label: 'ชำระแล้ว', cls: 'bg-emerald-50 text-emerald-700 border-emerald-300' }
+    if (row.invoice.status === 'overdue') return { key: 'overdue', label: 'เกินกำหนด', cls: 'bg-red-50 text-red-700 border-red-300' }
+    return { key: 'pending', label: 'รอชำระ', cls: 'bg-amber-50 text-amber-700 border-amber-300' }
+  }
+
+  const issueOne = async (row) => {
+    setBusy(true)
+    const cfg = loadBillCfg()
+    const due = new Date(year, month - 1, Math.min(28, cfg.due_day || 5))
+    const { data: numData, error: numErr } = await supabase.rpc('next_invoice_number', { p_year: year })
+    if (numErr) { setBusy(false); return toast('ออกบิลไม่สำเร็จ: ' + numErr.message, 'error') }
+    const { error } = await supabase.from('invoices').insert({
+      invoice_number: numData, room_id: row.room.id, tenant_id: row.tenant.id, branch_id: branchId,
+      month, year, rent_amount: row.rent, water_cost: row.water, other_fees: 0,
+      due_date: due.toISOString().slice(0, 10), status: 'pending', created_by: profile.id,
+    })
+    setBusy(false)
+    if (error) return toast('ออกบิลไม่สำเร็จ: ' + error.message, 'error')
+    toast('ออกบิลเรียบร้อย')
+    load()
+  }
+
+  const [lineBusy, setLineBusy] = useState(false)
+  const sendLine = async (row) => {
+    setLineBusy(true)
+    try {
+      await callEdgeFn('send-line-message', { tenant_id: row.tenant.id, message_type: 'invoice', invoice_id: row.invoice.id })
+      toast('ส่งแจ้งยอดทาง LINE แล้ว')
+    } catch (e) { toast(e.message, 'error') }
+    setLineBusy(false)
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        <Select value={branchId} onChange={(e) => setBranchId(e.target.value)} className="!w-auto flex-1 min-w-[160px]">
+          {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </Select>
+        <PeriodPicker month={month} year={year} onMonth={setMonth} onYear={setYear} />
+      </div>
+
+      {loading ? <FullLoader /> : rows.length === 0 ? (
+        <EmptyState icon="🏠" title="ไม่มีห้องในสาขานี้" />
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+          {rows.map((row) => {
+            const st = statusOf(row)
+            return (
+              <button
+                key={row.room.id}
+                onClick={() => row.tenant && setSelected(row)}
+                disabled={!row.tenant}
+                className={'text-left rounded-2xl border p-3.5 transition ' + st.cls + (row.tenant ? ' hover:shadow-md cursor-pointer' : ' cursor-default opacity-60')}
+              >
+                <p className="font-bold text-slate-800 text-lg">{row.room.room_number}</p>
+                <p className="text-xs text-slate-500 truncate">{row.tenant?.full_name || '—'}</p>
+                <p className="text-[11px] font-semibold mt-2 px-2 py-0.5 rounded-full inline-block bg-white/70">{st.label}</p>
+                {row.invoice && <p className="text-sm font-bold mt-1.5">{fmtBaht(row.invoice.total_amount)}</p>}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {selected && (
+        <Modal
+          open
+          onClose={() => setSelected(null)}
+          title={`ห้อง ${selected.room.room_number} · ${selected.tenant?.full_name || ''}`}
+          footer={<Button variant="ghost" onClick={() => setSelected(null)}>ปิด</Button>}
+        >
+          <p className="text-xs text-slate-400">{branchName(branchId)} · {monthLabel(month)} {year + 543}</p>
+          <div className="bg-slate-50 rounded-xl p-4 my-3 space-y-1 text-sm">
+            <div className="flex justify-between"><span className="text-slate-500">ค่าเช่า</span><span>{fmtBaht(selected.rent)}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">ค่าน้ำ{selected.waterUnits != null ? ` (${selected.waterUnits} หน่วย)` : ' (ยังไม่จดมิเตอร์)'}</span><span>{fmtBaht(selected.water)}</span></div>
+            {selected.invoice && (
+              <div className="flex justify-between font-bold text-brand border-t border-slate-200 pt-1.5 mt-1.5"><span>ยอดรวม</span><span>{fmtBaht(selected.invoice.total_amount)}</span></div>
+            )}
+          </div>
+
+          {!selected.invoice && (
+            <Button className="w-full" onClick={() => issueOne(selected)} disabled={busy}>
+              {busy ? <Spinner className="w-5 h-5" /> : '🧾 ออกบิลห้องนี้'}
+            </Button>
+          )}
+
+          {selected.invoice && selected.invoice.status !== 'paid' && (
+            <div className="grid grid-cols-2 gap-2">
+              <Button variant="outline" onClick={() => sendLine(selected)} disabled={lineBusy}>{lineBusy ? 'กำลังส่ง...' : '💬 ส่ง LINE'}</Button>
+              <Button onClick={() => setModal('pay')}>💰 รับชำระ</Button>
+            </div>
+          )}
+
+          {selected.invoice && selected.invoice.status === 'paid' && (
+            <Button
+              variant="outline"
+              className="w-full"
+              onClick={() => openInvoiceDoc(selected.invoice, { branchName: branchName(branchId), tenantName: selected.tenant.full_name, roomNumber: selected.room.room_number }, true)}
+            >
+              📄 ดูใบเสร็จ
+            </Button>
+          )}
+        </Modal>
+      )}
+
+      {selected && modal === 'pay' && selected.invoice && (
+        <PaymentModal
+          inv={selected.invoice}
+          profile={profile}
+          ctx={{ branchName: branchName(branchId), tenantName: selected.tenant.full_name, roomNumber: selected.room.room_number }}
+          onClose={() => setModal(null)}
+          onDone={() => { setModal(null); setSelected(null); load() }}
+          toast={toast}
+        />
       )}
     </div>
   )
