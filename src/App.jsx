@@ -1783,7 +1783,7 @@ function WaterMeter({ profile, branches, toast }) {
    ============================================================ */
 function RoomBoard({ profile, branches, toast, onNavigate }) {
   const now = new Date()
-  const [branchId, setBranchId] = useState(branches[0]?.id || '')
+  const [branchId, setBranchId] = useState('') // '' = ทุกสาขา
   const [month, setMonth] = useState(now.getMonth() + 1)
   const [year, setYear] = useState(now.getFullYear())
   const [statusFilter, setStatusFilter] = useState('all') // all | vacant | nobill | pending | overdue | paid
@@ -1794,15 +1794,18 @@ function RoomBoard({ profile, branches, toast, onNavigate }) {
   const [modal, setModal] = useState(null) // 'pay' | null
 
   const load = useCallback(async () => {
-    if (!branchId) return
     setLoading(true)
-    const [{ data: rooms }, { data: types }, { data: tenants }, { data: meters }, { data: invoices }] = await Promise.all([
-      supabase.from('rooms').select('id, room_number, room_type_id, branch_id').eq('branch_id', branchId),
-      supabase.from('room_types').select('id, price'),
-      supabase.from('tenants').select('id, full_name, room_id').eq('branch_id', branchId).eq('status', 'active'),
-      supabase.from('water_meter_logs').select('*').eq('branch_id', branchId).eq('month', month).eq('year', year),
-      supabase.from('invoices').select('*').eq('branch_id', branchId).eq('month', month).eq('year', year),
-    ])
+    let roomsQ = supabase.from('rooms').select('id, room_number, room_type_id, branch_id')
+    let tenantsQ = supabase.from('tenants').select('id, full_name, room_id, branch_id').eq('status', 'active')
+    let metersQ = supabase.from('water_meter_logs').select('*').eq('month', month).eq('year', year)
+    let invoicesQ = supabase.from('invoices').select('*').eq('month', month).eq('year', year)
+    if (branchId) {
+      roomsQ = roomsQ.eq('branch_id', branchId)
+      tenantsQ = tenantsQ.eq('branch_id', branchId)
+      metersQ = metersQ.eq('branch_id', branchId)
+      invoicesQ = invoicesQ.eq('branch_id', branchId)
+    }
+    const [{ data: rooms }, { data: types }, { data: tenants }, { data: meters }, { data: invoices }] = await Promise.all([roomsQ, supabase.from('room_types').select('id, price'), tenantsQ, metersQ, invoicesQ])
     const invIds = (invoices || []).map((i) => i.id)
     const { data: logs } = invIds.length
       ? await supabase.from('line_message_logs').select('invoice_id, message_type, status').in('invoice_id', invIds).eq('message_type', 'receipt').eq('status', 'sent')
@@ -1845,7 +1848,7 @@ function RoomBoard({ profile, branches, toast, onNavigate }) {
     const { data: numData, error: numErr } = await supabase.rpc('next_invoice_number', { p_year: year })
     if (numErr) { setBusy(false); return toast('ออกบิลไม่สำเร็จ: ' + numErr.message, 'error') }
     const { error } = await supabase.from('invoices').insert({
-      invoice_number: numData, room_id: row.room.id, tenant_id: row.tenant.id, branch_id: branchId,
+      invoice_number: numData, room_id: row.room.id, tenant_id: row.tenant.id, branch_id: row.room.branch_id,
       month, year, rent_amount: row.rent, water_cost: row.water, other_fees: 0,
       due_date: due.toISOString().slice(0, 10), status: 'pending', created_by: profile.id,
     })
@@ -1870,6 +1873,7 @@ function RoomBoard({ profile, branches, toast, onNavigate }) {
     <div className="space-y-4">
       <div className="flex flex-wrap gap-2">
         <Select value={branchId} onChange={(e) => setBranchId(e.target.value)} className="!w-auto flex-1 min-w-[160px]">
+          <option value="">🌐 ทุกสาขา</option>
           {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
         </Select>
         <PeriodPicker month={month} year={year} onMonth={setMonth} onYear={setYear} />
@@ -1882,7 +1886,7 @@ function RoomBoard({ profile, branches, toast, onNavigate }) {
       </div>
 
       {loading ? <FullLoader /> : rows.length === 0 ? (
-        <EmptyState icon="🏠" title="ไม่มีห้องในสาขานี้" />
+        <EmptyState icon="🏠" title="ไม่มีห้อง" />
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
           {rows.filter((row) => statusFilter === 'all' || statusOf(row).key === statusFilter).map((row) => {
@@ -1894,6 +1898,7 @@ function RoomBoard({ profile, branches, toast, onNavigate }) {
                 className={'text-left rounded-2xl border p-3.5 transition hover:shadow-md cursor-pointer ' + st.cls}
               >
                 <p className="font-bold text-slate-800 text-lg">{row.room.room_number}</p>
+                {!branchId && <p className="text-[10px] text-slate-400 -mt-0.5">{branchName(row.room.branch_id)}</p>}
                 <p className="text-xs text-slate-500 truncate">{row.tenant?.full_name || 'ไม่มีผู้เช่า'}</p>
                 <p className="text-[11px] font-semibold mt-2 px-2 py-0.5 rounded-full inline-block bg-white/70">{st.label}</p>
                 {row.invoice && <p className="text-sm font-bold mt-1.5">{fmtBaht(row.invoice.total_amount)}</p>}
@@ -1914,7 +1919,7 @@ function RoomBoard({ profile, branches, toast, onNavigate }) {
             {onNavigate && <Button onClick={() => onNavigate('tenants')}>+ เพิ่มผู้เช่าห้องนี้</Button>}
           </>}
         >
-          <p className="text-sm text-slate-500">{branchName(branchId)}</p>
+          <p className="text-sm text-slate-500">{branchName(selected.room.branch_id)}</p>
           <p className="text-sm text-slate-600 mt-2">ค่าเช่าตามประเภทห้อง: {fmtBaht(selected.rent)}</p>
           <p className="text-sm text-slate-400 mt-3">ห้องนี้ยังว่าง — กด "+ เพิ่มผู้เช่าห้องนี้" เพื่อผูกผู้เช่าใหม่</p>
         </Modal>
@@ -1927,7 +1932,7 @@ function RoomBoard({ profile, branches, toast, onNavigate }) {
           title={`ห้อง ${selected.room.room_number} · ${selected.tenant?.full_name || ''}`}
           footer={<Button variant="ghost" onClick={() => setSelected(null)}>ปิด</Button>}
         >
-          <p className="text-xs text-slate-400">{branchName(branchId)} · {monthLabel(month)} {year + 543}</p>
+          <p className="text-xs text-slate-400">{branchName(selected.room.branch_id)} · {monthLabel(month)} {year + 543}</p>
           <div className="bg-slate-50 rounded-xl p-4 my-3 space-y-1 text-sm">
             <div className="flex justify-between"><span className="text-slate-500">ค่าเช่า</span><span>{fmtBaht(selected.rent)}</span></div>
             <div className="flex justify-between"><span className="text-slate-500">ค่าน้ำ{selected.waterUnits != null ? ` (${selected.waterUnits} หน่วย)` : ' (ยังไม่จดมิเตอร์)'}</span><span>{fmtBaht(selected.water)}</span></div>
@@ -1956,7 +1961,7 @@ function RoomBoard({ profile, branches, toast, onNavigate }) {
             <div className="grid grid-cols-2 gap-2">
               <Button
                 variant="outline"
-                onClick={() => openInvoiceDoc(selected.invoice, { branchName: branchName(branchId), tenantName: selected.tenant.full_name, roomNumber: selected.room.room_number }, true)}
+                onClick={() => openInvoiceDoc(selected.invoice, { branchName: branchName(selected.room.branch_id), tenantName: selected.tenant.full_name, roomNumber: selected.room.room_number }, true)}
               >
                 📄 ดูใบเสร็จ
               </Button>
@@ -1970,7 +1975,7 @@ function RoomBoard({ profile, branches, toast, onNavigate }) {
         <PaymentModal
           inv={selected.invoice}
           profile={profile}
-          ctx={{ branchName: branchName(branchId), tenantName: selected.tenant.full_name, roomNumber: selected.room.room_number }}
+          ctx={{ branchName: branchName(selected.room.branch_id), tenantName: selected.tenant.full_name, roomNumber: selected.room.room_number }}
           onClose={() => setModal(null)}
           onDone={() => { setModal(null); setSelected(null); load() }}
           toast={toast}
