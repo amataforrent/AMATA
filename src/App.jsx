@@ -323,7 +323,7 @@ const NAV = [
   { key: 'tenants', label: 'ผู้เช่า', icon: Icon.tenant, roles: ['admin', 'collector', 'water_staff'], group: 'ห้องพัก' },
   { key: 'maintenance', label: 'แจ้งซ่อม', icon: Icon.wrench, roles: ['admin', 'collector', 'water_staff'], group: 'ห้องพัก' },
   // การเงิน
-  { key: 'meter', label: 'จดมิเตอร์น้ำ', icon: Icon.meter, roles: ['admin', 'water_staff'], group: 'การเงิน' },
+  { key: 'meter', label: 'จดมิเตอร์น้ำ', icon: Icon.meter, roles: ['admin', 'collector', 'water_staff'], group: 'การเงิน' },
   { key: 'issue', label: 'ออกบิล', icon: Icon.invoice, roles: ['admin', 'collector'], group: 'การเงิน' },
   { key: 'receive', label: 'รับชำระ', icon: Icon.pay, roles: ['admin', 'collector'], group: 'การเงิน' },
   { key: 'pendingslips', label: 'สลิปรอตรวจสอบ', icon: Icon.pay, roles: ['admin', 'collector'], group: 'การเงิน' },
