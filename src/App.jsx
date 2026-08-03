@@ -1055,7 +1055,19 @@ function Tenants({ profile, branches, toast }) {
   const remove = async (t) => {
     if (!confirm(`ลบผู้เช่า "${t.full_name}"?`)) return
     const { error } = await supabase.from('tenants').delete().eq('id', t.id)
-    if (error) return toast('ลบไม่สำเร็จ: ' + error.message, 'error')
+    if (error) {
+      if (error.message.includes('foreign key') || error.code === '23503') {
+        if (confirm(`ลบไม่ได้ เพราะ "${t.full_name}" มีประวัติบิล/การชำระเงินผูกอยู่ในระบบ (ลบไม่ได้เพื่อไม่ให้ประวัติการเงินหาย)\n\nต้องการ "ปิดการเช่า" แทนไหม? (ย้ายเป็นผู้เช่าเดิม + ห้องว่างลง แต่ประวัติเก่ายังอยู่)`)) {
+          const { error: e2 } = await supabase.from('tenants').update({ status: 'inactive' }).eq('id', t.id)
+          if (e2) return toast('ทำรายการไม่สำเร็จ: ' + e2.message, 'error')
+          if (t.room_id) await supabase.from('rooms').update({ status: 'vacant' }).eq('id', t.room_id)
+          toast('ปิดการเช่าเรียบร้อย (ประวัติเดิมยังอยู่)')
+          load()
+        }
+        return
+      }
+      return toast('ลบไม่สำเร็จ: ' + error.message, 'error')
+    }
     if (t.room_id) await supabase.from('rooms').update({ status: 'vacant' }).eq('id', t.room_id)
     toast('ลบผู้เช่าเรียบร้อย')
     load()
@@ -2561,7 +2573,7 @@ function PendingSlips({ profile, branches, toast }) {
   const branchName = (id) => branches.find((b) => b.id === id)?.name || ''
 
   const loadInvoicesFor = async (slip) => {
-    const { data } = await supabase.from('invoices').select('*').eq('tenant_id', slip.tenant_id).in('status', ['pending', 'overdue']).order('year', { ascending: false }).order('month', { ascending: false })
+    const { data } = await supabase.from('invoices').select('*').eq('tenant_id', slip.tenant_id).in('status', ['pending', 'overdue']).order('year', { ascending: true }).order('month', { ascending: true })
     setInvoices(data || [])
     setApplying(slip)
   }
@@ -2616,12 +2628,20 @@ function PendingSlips({ profile, branches, toast }) {
 }
 
 function ApplySlipModal({ slip, invoices, roomNumber, tenantName, profile, onClose, onDone, toast }) {
+  const [filterMonth, setFilterMonth] = useState(0) // 0 = ทุกเดือน
+  const [filterYear, setFilterYear] = useState(0) // 0 = ทุกปี
+  const shown = invoices.filter((i) => (!filterMonth || i.month === filterMonth) && (!filterYear || i.year === filterYear))
   const [invId, setInvId] = useState(invoices[0]?.id || '')
   const [amount, setAmount] = useState(invoices[0] ? String(invoices[0].total_amount) : '')
   const [saving, setSaving] = useState(false)
   const inv = invoices.find((i) => i.id === invId)
 
   useEffect(() => { if (inv) setAmount(String(inv.total_amount)) }, [invId])
+  useEffect(() => {
+    if (!shown.find((i) => i.id === invId)) setInvId(shown[0]?.id || '')
+  }, [filterMonth, filterYear])
+
+  const years = [...new Set(invoices.map((i) => i.year))].sort()
 
   const submit = async () => {
     if (!inv) return toast('เลือกบิลก่อน', 'error')
@@ -2659,12 +2679,33 @@ function ApplySlipModal({ slip, invoices, roomNumber, tenantName, profile, onClo
         <p className="text-sm text-slate-500">ผู้เช่ารายนี้ไม่มีบิลค้างชำระ</p>
       ) : (
         <>
-          <Field label="บิลที่ตรงกัน">
-            <Select value={invId} onChange={(e) => setInvId(e.target.value)}>
-              {invoices.map((i) => <option key={i.id} value={i.id}>{i.invoice_number} · {monthLabel(i.month)} {i.year + 543} · {fmtBaht(i.total_amount)}</option>)}
-            </Select>
+          <Field label="กรองก่อนเลือกบิล — เดือน/ปีที่ลูกค้าต้องการจ่าย">
+            <div className="grid grid-cols-2 gap-2">
+              <Select value={filterMonth} onChange={(e) => setFilterMonth(Number(e.target.value))}>
+                <option value={0}>ทุกเดือน</option>
+                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => <option key={m} value={m}>{monthLabel(m)}</option>)}
+              </Select>
+              <Select value={filterYear} onChange={(e) => setFilterYear(Number(e.target.value))}>
+                <option value={0}>ทุกปี</option>
+                {years.map((y) => <option key={y} value={y}>{y + 543}</option>)}
+              </Select>
+            </div>
           </Field>
-          <Field label="จำนวนเงินที่ยืนยัน (บาท)"><Input type="number" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+          {shown.length === 0 ? (
+            <p className="text-sm text-amber-600 -mt-2 mb-2">ไม่พบบิลค้างชำระของเดือน/ปีที่เลือก ลองเปลี่ยนตัวกรองดูครั้ง</p>
+          ) : (
+            <>
+              <Field label="บิลที่ตรงกัน">
+                <Select value={invId} onChange={(e) => setInvId(e.target.value)}>
+                  {shown.map((i) => <option key={i.id} value={i.id}>{monthLabel(i.month)} {i.year + 543} · {i.invoice_number} · {fmtBaht(i.total_amount)} · {STATUS_INV[i.status].label}</option>)}
+                </Select>
+              </Field>
+              {inv && (
+                <p className="text-xs text-amber-600 -mt-2 mb-2">⚠️ กำลังยืนยันเป็นค่าเช่าเดือน <b>{monthLabel(inv.month)} {inv.year + 543}</b> — ตรวจให้ตรงกับที่ลูกค้าโอนก่อนยืนยัน</p>
+              )}
+              <Field label="จำนวนเงินที่ยืนยัน (บาท)"><Input type="number" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+            </>
+          )}
         </>
       )}
     </Modal>
