@@ -317,15 +317,13 @@ function Login() {
 const NAV = [
   // ภาพรวม
   { key: 'dashboard', label: 'ภาพรวม', icon: Icon.dashboard, roles: ['admin', 'collector', 'water_staff'], group: null },
-  { key: 'board', label: 'ห้อง & บิล (ดูง่าย)', icon: Icon.invoice, roles: ['admin', 'collector'], group: null },
+  { key: 'board', label: 'ห้อง & บิล', icon: Icon.invoice, roles: ['admin', 'collector'], group: null },
   // ห้องพัก
   { key: 'rooms', label: 'ห้องเช่า', icon: Icon.room, roles: ['admin', 'collector', 'water_staff'], group: 'ห้องพัก' },
   { key: 'tenants', label: 'ผู้เช่า', icon: Icon.tenant, roles: ['admin', 'collector', 'water_staff'], group: 'ห้องพัก' },
   { key: 'maintenance', label: 'แจ้งซ่อม', icon: Icon.wrench, roles: ['admin', 'collector', 'water_staff'], group: 'ห้องพัก' },
   // การเงิน
   { key: 'meter', label: 'จดมิเตอร์น้ำ', icon: Icon.meter, roles: ['admin', 'collector', 'water_staff'], group: 'การเงิน' },
-  { key: 'issue', label: 'ออกบิล', icon: Icon.invoice, roles: ['admin', 'collector'], group: 'การเงิน' },
-  { key: 'receive', label: 'รับชำระ', icon: Icon.pay, roles: ['admin', 'collector'], group: 'การเงิน' },
   { key: 'pendingslips', label: 'สลิปรอตรวจสอบ', icon: Icon.pay, roles: ['admin', 'collector'], group: 'การเงิน' },
   { key: 'tracking', label: 'ติดตามบิล', icon: Icon.list, roles: ['admin', 'collector', 'water_staff'], group: 'การเงิน' },
   { key: 'finance', label: 'รายรับ-รายจ่าย', icon: Icon.money, roles: ['admin', 'collector'], group: 'การเงิน' },
@@ -452,8 +450,6 @@ function Shell({ session, profile, branches, refreshBranches }) {
           {page === 'tenants' && <Tenants profile={profile} branches={branches} toast={toast} />}
           {page === 'meter' && <WaterMeter profile={profile} branches={branches} toast={toast} />}
           {page === 'maintenance' && <Maintenance profile={profile} branches={branches} toast={toast} />}
-          {page === 'issue' && (profile.role === 'admin' || profile.role === 'collector') && <IssueInvoices profile={profile} branches={branches} toast={toast} />}
-          {page === 'receive' && (profile.role === 'admin' || profile.role === 'collector') && <ReceivePayment profile={profile} branches={branches} toast={toast} />}
           {page === 'pendingslips' && (profile.role === 'admin' || profile.role === 'collector') && <PendingSlips profile={profile} branches={branches} toast={toast} />}
           {page === 'tracking' && <InvoiceTracking profile={profile} branches={branches} toast={toast} />}
           {page === 'sendline' && (profile.role === 'admin' || profile.role === 'collector') && <SendLine profile={profile} branches={branches} toast={toast} />}
@@ -1806,6 +1802,11 @@ function RoomBoard({ profile, branches, toast }) {
       supabase.from('water_meter_logs').select('*').eq('branch_id', branchId).eq('month', month).eq('year', year),
       supabase.from('invoices').select('*').eq('branch_id', branchId).eq('month', month).eq('year', year),
     ])
+    const invIds = (invoices || []).map((i) => i.id)
+    const { data: logs } = invIds.length
+      ? await supabase.from('line_message_logs').select('invoice_id, message_type, status').in('invoice_id', invIds).eq('message_type', 'receipt').eq('status', 'sent')
+      : { data: [] }
+    const receiptSent = new Set((logs || []).map((l) => l.invoice_id))
     const priceOf = (tid) => types?.find((t) => t.id === tid)?.price || 0
     const list = naturalSortRooms(rooms).map((r) => {
       const tenant = tenants?.find((t) => t.room_id === r.id)
@@ -1817,6 +1818,7 @@ function RoomBoard({ profile, branches, toast }) {
         water: meter ? Number(meter.total_water_cost) : 0,
         waterUnits: meter ? Number(meter.units_used) : null,
         invoice: inv || null,
+        receiptSent: inv ? receiptSent.has(inv.id) : false,
       }
     })
     setRows(list)
@@ -1858,6 +1860,7 @@ function RoomBoard({ profile, branches, toast }) {
     try {
       await callEdgeFn('send-line-message', { tenant_id: row.tenant.id, message_type: type, invoice_id: row.invoice.id })
       toast(type === 'receipt' ? 'ส่งใบเสร็จทาง LINE แล้ว' : type === 'reminder' ? 'ส่งแจ้งเตือนค้างชำระแล้ว' : 'ส่งแจ้งยอดทาง LINE แล้ว')
+      if (type === 'receipt') load()
     } catch (e) { toast(e.message, 'error') }
     setLineBusy('')
   }
@@ -1888,6 +1891,7 @@ function RoomBoard({ profile, branches, toast }) {
                 <p className="text-xs text-slate-500 truncate">{row.tenant?.full_name || '—'}</p>
                 <p className="text-[11px] font-semibold mt-2 px-2 py-0.5 rounded-full inline-block bg-white/70">{st.label}</p>
                 {row.invoice && <p className="text-sm font-bold mt-1.5">{fmtBaht(row.invoice.total_amount)}</p>}
+                {row.receiptSent && <p className="text-[10.5px] font-semibold text-emerald-600 mt-1">✅ ส่งใบเสร็จแล้ว</p>}
               </button>
             )
           })}
@@ -1934,7 +1938,7 @@ function RoomBoard({ profile, branches, toast }) {
               >
                 📄 ดูใบเสร็จ
               </Button>
-              <Button onClick={() => sendLine(selected, 'receipt')} disabled={!!lineBusy}>{lineBusy === 'receipt' ? 'กำลังส่ง...' : '💬 ส่งใบเสร็จ LINE'}</Button>
+              <Button variant={selected.receiptSent ? 'outline' : undefined} onClick={() => sendLine(selected, 'receipt')} disabled={!!lineBusy}>{lineBusy === 'receipt' ? 'กำลังส่ง...' : selected.receiptSent ? '✅ ส่งแล้ว (ส่งซ้ำ)' : '💬 ส่งใบเสร็จ LINE'}</Button>
             </div>
           )}
         </Modal>
@@ -2827,7 +2831,9 @@ function InvoiceDetailModal({ inv, profile, ctx, onClose, onChanged, toast }) {
   const [payments, setPayments] = useState(null)
   const [slipUrls, setSlipUrls] = useState({})
   const [editing, setEditing] = useState(false)
+  const [paying, setPaying] = useState(false)
   const isAdmin = profile.role === 'admin'
+  const canPay = isAdmin || profile.role === 'collector'
 
   useEffect(() => {
     ;(async () => {
@@ -2917,6 +2923,7 @@ function InvoiceDetailModal({ inv, profile, ctx, onClose, onChanged, toast }) {
         <Button variant="outline" className="!py-2 !px-3 text-xs" onClick={() => sendLine('invoice')} disabled={lineBusy === 'invoice'}>{lineBusy === 'invoice' ? 'กำลังส่ง...' : '💬 ส่งแจ้งยอด'}</Button>
         <Button variant="outline" className="!py-2 !px-3 text-xs" onClick={() => sendLine('reminder')} disabled={lineBusy === 'reminder'}>{lineBusy === 'reminder' ? 'กำลังส่ง...' : '💬 ส่งแจ้งเตือนค้างชำระ'}</Button>
         {inv.status === 'paid' && <Button variant="outline" className="!py-2 !px-3 text-xs" onClick={() => sendLine('receipt')} disabled={lineBusy === 'receipt'}>{lineBusy === 'receipt' ? 'กำลังส่ง...' : '💬 ส่งใบเสร็จ'}</Button>}
+        {canPay && inv.status !== 'paid' && <Button className="!py-2 !px-3 text-xs" onClick={() => setPaying(true)}>💰 รับชำระเงิน</Button>}
       </div>
 
       {isAdmin && (
@@ -2929,6 +2936,9 @@ function InvoiceDetailModal({ inv, profile, ctx, onClose, onChanged, toast }) {
       )}
       {editing && (
         <EditInvoiceModal inv={inv} onClose={() => setEditing(false)} onDone={() => { setEditing(false); onChanged() }} toast={toast} />
+      )}
+      {paying && (
+        <PaymentModal inv={inv} profile={profile} ctx={ctx} onClose={() => setPaying(false)} onDone={() => { setPaying(false); onChanged() }} toast={toast} />
       )}
     </Modal>
   )
@@ -3196,6 +3206,7 @@ function Finance({ profile, branches, toast }) {
   const [loading, setLoading] = useState(true)
   const [txns, setTxns] = useState([])
   const [adding, setAdding] = useState(false)
+  const [filterType, setFilterType] = useState('all') // all | income | expense
 
   const load = useCallback(async () => {
     if (!branchId) { setLoading(false); return }
@@ -3278,11 +3289,17 @@ function Finance({ profile, branches, toast }) {
         <Button variant="outline" className="!py-2 !px-3 text-xs" onClick={exportCsv} disabled={txns.length === 0}>ดาวน์โหลด CSV</Button>
       </div>
 
+      <div className="flex gap-2">
+        {[['all', 'ทั้งหมด'], ['income', 'รายรับ'], ['expense', 'รายจ่าย']].map(([v, l]) => (
+          <button key={v} onClick={() => setFilterType(v)} className={'flex-1 py-2 rounded-xl text-sm font-semibold border ' + (filterType === v ? 'bg-brand text-white border-brand' : 'bg-white text-slate-600 border-slate-300')}>{l}</button>
+        ))}
+      </div>
+
       {loading ? <FullLoader /> : txns.length === 0 ? (
         <EmptyState icon="💰" title="ยังไม่มีรายการในเดือนนี้" />
       ) : (
         <div className="space-y-2">
-          {txns.map((t) => (
+          {txns.filter((t) => filterType === 'all' || t.type === filterType).map((t) => (
             <div key={t.id} className="bg-white rounded-2xl border border-slate-100 p-4 flex items-center gap-3">
               <div className={'w-1.5 h-10 rounded-full ' + (t.type === 'income' ? 'bg-emerald-500' : 'bg-red-500')} />
               <div className="min-w-0 flex-1">
