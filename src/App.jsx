@@ -1841,13 +1841,13 @@ function RoomBoard({ profile, branches, toast }) {
   }
 
   const [lineBusy, setLineBusy] = useState(false)
-  const sendLine = async (row) => {
-    setLineBusy(true)
+  const sendLine = async (row, type) => {
+    setLineBusy(type)
     try {
-      await callEdgeFn('send-line-message', { tenant_id: row.tenant.id, message_type: 'invoice', invoice_id: row.invoice.id })
-      toast('ส่งแจ้งยอดทาง LINE แล้ว')
+      await callEdgeFn('send-line-message', { tenant_id: row.tenant.id, message_type: type, invoice_id: row.invoice.id })
+      toast(type === 'receipt' ? 'ส่งใบเสร็จทาง LINE แล้ว' : type === 'reminder' ? 'ส่งแจ้งเตือนค้างชำระแล้ว' : 'ส่งแจ้งยอดทาง LINE แล้ว')
     } catch (e) { toast(e.message, 'error') }
-    setLineBusy(false)
+    setLineBusy('')
   }
 
   return (
@@ -1905,20 +1905,25 @@ function RoomBoard({ profile, branches, toast }) {
           )}
 
           {selected.invoice && selected.invoice.status !== 'paid' && (
-            <div className="grid grid-cols-2 gap-2">
-              <Button variant="outline" onClick={() => sendLine(selected)} disabled={lineBusy}>{lineBusy ? 'กำลังส่ง...' : '💬 ส่ง LINE'}</Button>
-              <Button onClick={() => setModal('pay')}>💰 รับชำระ</Button>
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <Button variant="outline" onClick={() => sendLine(selected, 'invoice')} disabled={!!lineBusy}>{lineBusy === 'invoice' ? 'กำลังส่ง...' : '💬 แจ้งยอด'}</Button>
+                <Button variant="outline" className="!text-amber-600 !border-amber-300" onClick={() => sendLine(selected, 'reminder')} disabled={!!lineBusy}>{lineBusy === 'reminder' ? 'กำลังส่ง...' : '⚠️ แจ้งเตือนค้าง'}</Button>
+              </div>
+              <Button className="w-full" onClick={() => setModal('pay')}>💰 รับชำระเงิน</Button>
             </div>
           )}
 
           {selected.invoice && selected.invoice.status === 'paid' && (
-            <Button
-              variant="outline"
-              className="w-full"
-              onClick={() => openInvoiceDoc(selected.invoice, { branchName: branchName(branchId), tenantName: selected.tenant.full_name, roomNumber: selected.room.room_number }, true)}
-            >
-              📄 ดูใบเสร็จ
-            </Button>
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                variant="outline"
+                onClick={() => openInvoiceDoc(selected.invoice, { branchName: branchName(branchId), tenantName: selected.tenant.full_name, roomNumber: selected.room.room_number }, true)}
+              >
+                📄 ดูใบเสร็จ
+              </Button>
+              <Button onClick={() => sendLine(selected, 'receipt')} disabled={!!lineBusy}>{lineBusy === 'receipt' ? 'กำลังส่ง...' : '💬 ส่งใบเสร็จ LINE'}</Button>
+            </div>
           )}
         </Modal>
       )}
@@ -2443,16 +2448,8 @@ function PaymentModal({ inv, profile, ctx, onClose, onDone, toast }) {
     if (isFullyPaid) {
       await supabase.from('invoices').update({ status: 'paid' }).eq('id', inv.id)
     }
-    // บันทึกรายรับอัตโนมัติ
-    await supabase.from('transactions').insert({
-      branch_id: inv.branch_id,
-      type: 'income',
-      category: 'ค่าเช่า/ค่าน้ำ',
-      amount: Number(amount),
-      description: `รับชำระบิล ${inv.invoice_number} ห้อง ${ctx.roomNumber}`,
-      reference_id: inv.id,
-      created_by: profile.id,
-    })
+    // บันทึกรายรับอัตโนมัติ แยกค่าเช่า/ค่าน้ำ/อื่นๆ ตามสัดส่วนของยอดที่จ่ายจริง
+    await insertIncomeSplit(inv, Number(amount), ctx.roomNumber, profile.id)
     setSaving(false)
     if (isFullyPaid) {
       toast('รับชำระครบยอด เปลี่ยนสถานะเป็น "ชำระแล้ว"')
@@ -2644,11 +2641,7 @@ function ApplySlipModal({ slip, invoices, roomNumber, tenantName, profile, onClo
     const totalPaidSoFar = (prevPayments || []).reduce((a, p) => a + Number(p.amount_paid), 0)
     const isFullyPaid = totalPaidSoFar >= Number(inv.total_amount)
     if (isFullyPaid) await supabase.from('invoices').update({ status: 'paid' }).eq('id', inv.id)
-    await supabase.from('transactions').insert({
-      branch_id: inv.branch_id, type: 'income', category: 'ค่าเช่า/ค่าน้ำ',
-      amount: Number(amount), description: `รับชำระบิล ${inv.invoice_number} ห้อง ${roomNumber} (จากสลิป LINE)`,
-      reference_id: inv.id, created_by: profile.id,
-    })
+    await insertIncomeSplit(inv, Number(amount), roomNumber, profile.id, ' (จากสลิป LINE)')
     await supabase.from('line_pending_slips').update({ status: 'used', applied_invoice_id: inv.id }).eq('id', slip.id)
     setSaving(false)
     toast(isFullyPaid ? 'ยืนยันสลิปสำเร็จ บิลเป็น "ชำระแล้ว"' : 'บันทึกยอดแล้ว แต่ยังไม่ครบยอดบิล')
@@ -3136,6 +3129,24 @@ function SendLine({ profile, branches, toast }) {
 const EXPENSE_CATS = ['ซ่อมบำรุง', 'ค่าน้ำประปา', 'ค่าไฟส่วนกลาง', 'ค่าแรงงาน', 'วัสดุอุปกรณ์', 'อื่น ๆ']
 const INCOME_CATS = ['ค่าเช่า', 'ค่าน้ำ', 'มัดจำ', 'อื่น ๆ']
 
+// แตกยอดรับชำระเป็นสัดส่วน ค่าเช่า/ค่าน้ำ/อื่นๆ ตามโครงสร้างบิลจริง แล้วบันทึกเป็นรายรับแยกหมวด
+async function insertIncomeSplit(inv, amountPaid, roomNumber, userId, suffix = '') {
+  const total = Number(inv.total_amount) || 1
+  const parts = [
+    ['ค่าเช่า', Number(inv.rent_amount) || 0],
+    ['ค่าน้ำ', Number(inv.water_cost) || 0],
+    ['อื่น ๆ', Number(inv.other_fees) || 0],
+  ].filter(([, v]) => v > 0)
+  const rows = parts.map(([cat, v]) => ({
+    branch_id: inv.branch_id, type: 'income', category: cat,
+    amount: Math.round((v / total) * amountPaid * 100) / 100,
+    description: `รับชำระบิล ${inv.invoice_number} ห้อง ${roomNumber}${suffix}`,
+    reference_id: inv.id, created_by: userId,
+  }))
+  if (rows.length > 0) await supabase.from('transactions').insert(rows)
+}
+
+
 function Finance({ profile, branches, toast }) {
   const now = new Date()
   const [branchId, setBranchId] = useState(branches[0]?.id || '')
@@ -3163,6 +3174,10 @@ function Finance({ profile, branches, toast }) {
   const income = txns.filter((t) => t.type === 'income').reduce((a, t) => a + Number(t.amount), 0)
   const expense = txns.filter((t) => t.type === 'expense').reduce((a, t) => a + Number(t.amount), 0)
   const profit = income - expense
+  const byCat = (cat) => txns.filter((t) => t.type === 'income' && t.category === cat).reduce((a, t) => a + Number(t.amount), 0)
+  const rentIncome = byCat('ค่าเช่า')
+  const waterIncome = byCat('ค่าน้ำ')
+  const otherIncome = income - rentIncome - waterIncome
 
   const remove = async (t) => {
     if (!confirm('ลบรายการนี้?')) return
@@ -3182,7 +3197,7 @@ function Finance({ profile, branches, toast }) {
       t.type === 'income' ? t.amount : '',
       t.type === 'expense' ? t.amount : '',
     ])
-    const csv = [head, ...rows, [], ['', '', '', 'รวมรายรับ', income], ['', '', '', 'รวมรายจ่าย', expense], ['', '', '', 'กำไรสุทธิ', profit]]
+    const csv = [head, ...rows, [], ['', '', '', 'รวมรายรับ', income], ['', '', '', '  - ค่าเช่า', rentIncome], ['', '', '', '  - ค่าน้ำ', waterIncome], ['', '', '', '  - อื่นๆ/มัดจำ', otherIncome], ['', '', '', 'รวมรายจ่าย', expense], ['', '', '', 'กำไรสุทธิ', profit]]
       .map((r) => r.join(',')).join('\n')
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -3207,6 +3222,15 @@ function Finance({ profile, branches, toast }) {
         <div className="bg-white rounded-2xl p-4 border border-slate-100"><p className="text-xs text-slate-500">รายรับ</p><p className="text-lg font-bold text-emerald-600">{fmtBaht(income)}</p></div>
         <div className="bg-white rounded-2xl p-4 border border-slate-100"><p className="text-xs text-slate-500">รายจ่าย</p><p className="text-lg font-bold text-red-600">{fmtBaht(expense)}</p></div>
         <div className="bg-white rounded-2xl p-4 border border-slate-100"><p className="text-xs text-slate-500">กำไรสุทธิ</p><p className={'text-lg font-bold ' + (profit >= 0 ? 'text-brand' : 'text-red-600')}>{fmtBaht(profit)}</p></div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-100 p-4">
+        <p className="text-sm font-semibold text-slate-700 mb-3">สรุปรายรับตามหมวด</p>
+        <div className="grid grid-cols-3 gap-3">
+          <div><p className="text-xs text-slate-500">🏠 ค่าเช่าห้อง</p><p className="font-bold text-slate-800">{fmtBaht(rentIncome)}</p></div>
+          <div><p className="text-xs text-slate-500">💧 ค่าน้ำ</p><p className="font-bold text-slate-800">{fmtBaht(waterIncome)}</p></div>
+          <div><p className="text-xs text-slate-500">➕ อื่น ๆ/มัดจำ</p><p className="font-bold text-slate-800">{fmtBaht(otherIncome)}</p></div>
+        </div>
       </div>
 
       <div className="flex justify-end">
