@@ -2623,6 +2623,7 @@ function InvoiceTracking({ profile, branches, toast }) {
 function InvoiceDetailModal({ inv, profile, ctx, onClose, onChanged, toast }) {
   const [payments, setPayments] = useState(null)
   const [slipUrls, setSlipUrls] = useState({})
+  const [editing, setEditing] = useState(false)
   const isAdmin = profile.role === 'admin'
 
   useEffect(() => {
@@ -2717,10 +2718,14 @@ function InvoiceDetailModal({ inv, profile, ctx, onClose, onChanged, toast }) {
 
       {isAdmin && (
         <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-3">
+          <Button variant="outline" className="!py-2 !px-3 text-xs" onClick={() => setEditing(true)}>✏️ แก้ไขบิล (เดือน/ยอด)</Button>
           {inv.status !== 'paid' && <Button variant="outline" className="!py-2 !px-3 text-xs" onClick={() => setStatus('paid')}>ทำเครื่องหมายชำระแล้ว</Button>}
           {inv.status !== 'overdue' && inv.status !== 'paid' && <Button variant="outline" className="!py-2 !px-3 text-xs !text-red-600" onClick={() => setStatus('overdue')}>เกินกำหนด</Button>}
           {inv.status !== 'cancelled' && <Button variant="ghost" className="!py-2 !px-3 text-xs" onClick={() => setStatus('cancelled')}>ยกเลิกบิล</Button>}
         </div>
+      )}
+      {editing && (
+        <EditInvoiceModal inv={inv} onClose={() => setEditing(false)} onDone={() => { setEditing(false); onChanged() }} toast={toast} />
       )}
     </Modal>
   )
